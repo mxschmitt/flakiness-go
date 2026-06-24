@@ -279,6 +279,44 @@ func TestConvert_Interrupted(t *testing.T) {
 	}
 }
 
+func TestConvert_PassingBenchmark(t *testing.T) {
+	// Mirrors REAL `go test -bench` output: a passing benchmark emits run +
+	// output for the benchmark, but its only terminal is a PACKAGE-level pass
+	// (no Test field). It must be reported as passed, not interrupted.
+	stream := `
+{"Time":"2024-01-01T00:00:00Z","Action":"run","Package":"ex/pkg","Test":"BenchmarkFoo"}
+{"Time":"2024-01-01T00:00:00Z","Action":"output","Package":"ex/pkg","Test":"BenchmarkFoo","Output":"BenchmarkFoo-12  1000000  0.35 ns/op\n"}
+{"Time":"2024-01-01T00:00:01Z","Action":"output","Package":"ex/pkg","Output":"PASS\n"}
+{"Time":"2024-01-01T00:00:01Z","Action":"pass","Package":"ex/pkg","Elapsed":0.6}
+`
+	rep := decode(t, stream)
+	suite := findSuite(t, rep, "ex/pkg")
+	b := findTest(suite, "BenchmarkFoo")
+	if b == nil {
+		t.Fatal("BenchmarkFoo missing from report")
+	}
+	if b.Attempts[0].Status != report.StatusPassed {
+		t.Errorf("passing benchmark status = %q, want passed", b.Attempts[0].Status)
+	}
+}
+
+func TestConvert_FailingBenchmark(t *testing.T) {
+	// A failing benchmark DOES emit a per-test terminal (bench/fail), per the
+	// test2json contract, so it must be reported as failed.
+	stream := `
+{"Time":"2024-01-01T00:00:00Z","Action":"run","Package":"ex/pkg","Test":"BenchmarkBad"}
+{"Time":"2024-01-01T00:00:00Z","Action":"output","Package":"ex/pkg","Test":"BenchmarkBad","Output":"    b_test.go:3: nope\n"}
+{"Time":"2024-01-01T00:00:01Z","Action":"fail","Package":"ex/pkg","Test":"BenchmarkBad","Elapsed":0.1}
+{"Time":"2024-01-01T00:00:01Z","Action":"fail","Package":"ex/pkg","Elapsed":0.2}
+`
+	rep := decode(t, stream)
+	suite := findSuite(t, rep, "ex/pkg")
+	b := findTest(suite, "BenchmarkBad")
+	if b == nil || b.Attempts[0].Status != report.StatusFailed {
+		t.Errorf("failing benchmark should be failed, got %+v", b)
+	}
+}
+
 func TestConvert_BuildFailure(t *testing.T) {
 	// Real `go test -json` output for a package that fails to compile: the
 	// diagnostics arrive as build-output keyed by ImportPath, then the package

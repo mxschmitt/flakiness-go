@@ -160,8 +160,9 @@ func (r *Runner) buildEnvironment() report.Environment {
 	env := report.Environment{
 		Name: r.Cfg.Name,
 		SystemData: &report.SystemData{
-			OSName: osName(),
-			OSArch: runtime.GOARCH,
+			OSName:    osName(),
+			OSVersion: osVersion(),
+			OSArch:    runtime.GOARCH,
 		},
 		Metadata: map[string]any{
 			"go_version": strings.TrimPrefix(runtime.Version(), "go"),
@@ -213,6 +214,49 @@ func osName() string {
 	default:
 		return runtime.GOOS
 	}
+}
+
+// osVersion returns the OS version string, matching how the Node SDK populates
+// systemData.osVersion (createEnvironment.ts): macOS via `sw_vers
+// -productVersion`, Linux via VERSION_ID in /etc/os-release, Windows via the
+// `ver` command. Returns "" when it can't be determined (the field is then
+// omitted). Without it, Flakiness.io shows the environment OS as "unknown".
+func osVersion() string {
+	switch runtime.GOOS {
+	case "darwin":
+		if out, err := exec.Command("sw_vers", "-productVersion").Output(); err == nil {
+			return strings.TrimSpace(string(out))
+		}
+	case "linux":
+		if v := linuxOSReleaseVersionID(); v != "" {
+			return v
+		}
+	case "windows":
+		if out, err := exec.Command("cmd", "/c", "ver").Output(); err == nil {
+			return strings.TrimSpace(string(out))
+		}
+	}
+	return ""
+}
+
+// linuxOSReleaseVersionID reads VERSION_ID (e.g. "24.04") from /etc/os-release.
+func linuxOSReleaseVersionID() string {
+	data, err := os.ReadFile("/etc/os-release")
+	if err != nil {
+		return ""
+	}
+	return parseOSReleaseVersionID(string(data))
+}
+
+// parseOSReleaseVersionID extracts VERSION_ID from /etc/os-release content,
+// stripping surrounding quotes (e.g. `VERSION_ID="24.04"` -> `24.04`).
+func parseOSReleaseVersionID(content string) string {
+	for _, line := range strings.Split(content, "\n") {
+		if v, ok := strings.CutPrefix(strings.TrimSpace(line), "VERSION_ID="); ok {
+			return strings.Trim(strings.TrimSpace(v), `"`)
+		}
+	}
+	return ""
 }
 
 func (r *Runner) maybeUpload(rep *report.Report) {

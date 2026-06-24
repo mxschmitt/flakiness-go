@@ -8,7 +8,7 @@ feature — they are not gaps in this reporter so much as in the runner's output
 | # | Feature | Status | Notes |
 |---|---------|--------|-------|
 | 1 | Report metadata | ✅ | `commitId` from git HEAD, CI run URL auto-detected (GitHub Actions / Azure DevOps / GitLab `CI_JOB_URL` / Jenkins `BUILD_URL`), start time & duration from the event stream. `generatedBy` = `flakiness-go`, `testRunner` = `go test`, `runtime` = `go`. `configPath` N/A (Go has no single test config file). `relatedCommitIds` not populated. |
-| 2 | Environment metadata | ✅ | `name`, `osName` (normalized to the Flakiness convention — `darwin`→`macos`, `windows`→`win`, else GOOS — so FQL filters match other reporters), `osArch` (GOARCH), `go_version`. `osVersion` omitted (not cheaply available cross-platform). |
+| 2 | Environment metadata | ✅ | `name`, `osName` (normalized to the Flakiness convention — `darwin`→`macos`, `windows`→`win`, else GOOS — so FQL filters match other reporters), `osVersion` (macOS via `sw_vers -productVersion`, Linux via `VERSION_ID` in `/etc/os-release`, Windows via `ver` — matching the Node SDK; without it Flakiness.io renders the OS as "unknown"), `osArch` (GOARCH), `go_version`. |
 | 3 | Multiple environments | N/A | `go test` runs one toolchain/GOOS/GOARCH per invocation; a single `environments[]` entry is emitted. Matrix shards are separate runs/reports. |
 | 4 | Custom environments (`FK_ENV_*`) | ✅ | `FK_ENV_*` variables are parsed into `environment.metadata`: prefix matched case-insensitively, key lowercased, value trimmed + lowercased (matching the Node SDK so environments hash-dedup and FQL-match across reporters). |
 | 5 | Test hierarchy / suites | ✅ | Each package → a `file` suite (titled by import path). Subtests (`TestX/a/b`) → nested `suite` nodes per path segment; leaves are tests. A parent test that itself fails/panics (not just its subtests) keeps its own attempt as a leaf test inside its suite, so its error is not lost. |
@@ -43,7 +43,15 @@ feature — they are not gaps in this reporter so much as in the runner's output
 | `skip` | `skipped` (with a `skip` annotation carrying the `t.Skip` reason) |
 | `fail` | `failed` |
 | test killed by `-timeout` (panic banner, no per-test terminal event) | `timedOut` |
+| passing benchmark (no per-test terminal event, only a package-level `pass`) | `passed` |
 | `run` with no terminal event (binary crashed/aborted) | `interrupted` |
+
+Tests, subtests (`TestX/a/b`, arbitrary depth), examples (`func Example…`),
+fuzz targets run as tests (`func Fuzz…`), and benchmarks (`func Benchmark…`) are
+all handled. Benchmarks are a special case: per the test2json contract only a
+*failing* benchmark emits a per-test `bench`/`fail` event — a passing one
+produces just a package-level `pass` — so an un-terminated benchmark attempt is
+treated as passed rather than interrupted.
 
 When `go test -timeout` fires, the runner prints a `panic: test timed out`
 banner attributed to the hung test but emits **no** per-test `pass`/`fail`

@@ -47,7 +47,7 @@ func TestRunner_EndToEnd(t *testing.T) {
 		CommitID:      "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
 		GitRoot:       moduleDir,
 		DisableUpload: true,
-		GoTestArgs:    []string{"./..."},
+		GoTestArgs:    []string{"-bench=.", "./..."},
 	}
 	r := &Runner{
 		Cfg:     cfg,
@@ -133,6 +133,30 @@ func TestRunner_EndToEnd(t *testing.T) {
 	}
 	if statuses[report.StatusSkipped] < 1 {
 		t.Errorf("expected at least one skipped test, got %+v", statuses)
+	}
+
+	// The benchmark (run via -bench, in its own all-passing package) must be
+	// reported as passed, not interrupted — go test emits no per-test terminal
+	// event for a passing benchmark.
+	var bench *report.Test
+	var findBench func(report.Suite)
+	findBench = func(s report.Suite) {
+		for i := range s.Tests {
+			if s.Tests[i].Title == "BenchmarkAdd" {
+				bench = &s.Tests[i]
+			}
+		}
+		for _, sub := range s.Suites {
+			findBench(sub)
+		}
+	}
+	for _, s := range rep.Suites {
+		findBench(s)
+	}
+	if bench == nil {
+		t.Error("BenchmarkAdd missing from report")
+	} else if bench.Attempts[0].Status != report.StatusPassed {
+		t.Errorf("BenchmarkAdd status = %q, want passed", bench.Attempts[0].Status)
 	}
 
 	// Source location should be resolved for a top-level test.
@@ -291,6 +315,15 @@ func TestBuildEnvironment_OSNameAndFKEnv(t *testing.T) {
 		}
 	}
 
+	// osVersion must be populated on the major platforms — its absence is what
+	// made Flakiness.io render the environment OS as "unknown".
+	switch runtime.GOOS {
+	case "darwin", "linux", "windows":
+		if env.SystemData.OSVersion == "" {
+			t.Errorf("osVersion is empty on %s; Flakiness.io shows OS as 'unknown' without it", runtime.GOOS)
+		}
+	}
+
 	if got := env.Metadata["gpu_type"]; got != "h100" {
 		t.Errorf("FK_ENV_GPU_TYPE -> %q, want lowercased h100", got)
 	}
@@ -317,5 +350,20 @@ func TestRunner_SkipsUploadOnInvalidCommit(t *testing.T) {
 	}
 	if !strings.Contains(errb.String(), "not a 40-char SHA") {
 		t.Errorf("expected invalid-SHA warning, stderr = %q", errb.String())
+	}
+}
+
+func TestParseOSReleaseVersionID(t *testing.T) {
+	cases := []struct{ content, want string }{
+		{"NAME=\"Ubuntu\"\nVERSION_ID=\"24.04\"\n", "24.04"}, // quoted (Ubuntu/Debian)
+		{"NAME=Fedora\nVERSION_ID=40\n", "40"},               // unquoted (Fedora)
+		{"VERSION_ID=\"13\"", "13"},                          // no trailing newline
+		{"ID=alpine\nPRETTY_NAME=\"Alpine\"\n", ""},          // no VERSION_ID
+		{"  VERSION_ID = nope\n", ""},                        // spaces around = -> no match
+	}
+	for _, c := range cases {
+		if got := parseOSReleaseVersionID(c.content); got != c.want {
+			t.Errorf("parseOSReleaseVersionID(%q) = %q, want %q", c.content, got, c.want)
+		}
 	}
 }

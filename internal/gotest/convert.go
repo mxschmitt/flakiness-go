@@ -411,8 +411,13 @@ func (c *Converter) buildTestFrom(title, pkg, locFunc string, ta *testAcc) repor
 	if c.Locator != nil && locFunc != "" {
 		t.Location = c.Locator.Locate(pkg, locFunc)
 	}
+	// A benchmark only emits a per-test terminal event when it FAILS; a passing
+	// benchmark has no `Test`-scoped pass/bench event (only a package-level
+	// pass), so its attempt is otherwise left statusless. Flag it so an
+	// un-terminated benchmark attempt is treated as passed, not interrupted.
+	isBench := strings.HasPrefix(ta.name, "Benchmark")
 	for _, a := range ta.attempts {
-		t.Attempts = append(t.Attempts, c.buildAttempt(a))
+		t.Attempts = append(t.Attempts, c.buildAttempt(a, isBench))
 	}
 	if len(t.Attempts) == 0 {
 		t.Attempts = []report.RunAttempt{{
@@ -425,7 +430,7 @@ func (c *Converter) buildTestFrom(title, pkg, locFunc string, ta *testAcc) repor
 	return t
 }
 
-func (c *Converter) buildAttempt(a *attempt) report.RunAttempt {
+func (c *Converter) buildAttempt(a *attempt, isBench bool) report.RunAttempt {
 	status := a.status
 	if status == "" {
 		// No terminal event was seen for this attempt. When `go test -timeout`
@@ -433,9 +438,15 @@ func (c *Converter) buildAttempt(a *attempt) report.RunAttempt {
 		// (attributed to the test) but emits no per-test `fail` event — only
 		// the package fails. Detect that here so the attempt is reported as
 		// timedOut rather than a generic interruption.
-		if isTimeout(a.output.String()) {
+		switch {
+		case isTimeout(a.output.String()):
 			status = report.StatusTimedOut
-		} else {
+		case isBench:
+			// A passing benchmark emits no per-test terminal event (only
+			// failing ones do, via a `bench`/`fail` event). An un-terminated
+			// benchmark attempt therefore passed.
+			status = report.StatusPassed
+		default:
 			status = report.StatusInterrupted
 		}
 	}
