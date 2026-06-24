@@ -7,7 +7,6 @@ import (
 	"net/http/httptest"
 	"sync/atomic"
 	"testing"
-	"time"
 
 	"github.com/andybalholm/brotli"
 
@@ -15,8 +14,10 @@ import (
 )
 
 func init() {
-	// Make retries instant in tests.
-	backoff = func(int) time.Duration { return 0 }
+	// Make retries instant in tests (preserve the number of attempts).
+	for i := range httpBackoff {
+		httpBackoff[i] = 0
+	}
 }
 
 func TestUpload_HappyPath(t *testing.T) {

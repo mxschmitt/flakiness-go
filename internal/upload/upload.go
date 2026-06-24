@@ -208,10 +208,23 @@ func (c *Client) putBytes(url string, data []byte, contentType, contentEncoding 
 	return expectOK(resp)
 }
 
-// doWithRetry retries on transient 5xx responses with exponential backoff,
-// mirroring the urllib3 Retry config in the reference uploader.
+// httpBackoff is the inter-attempt delay schedule, matching the Node SDK's
+// HTTP_BACKOFF (_internalUtils.ts): 7 total attempts, capped at 1s. Overridable
+// in tests.
+var httpBackoff = []time.Duration{
+	100 * time.Millisecond,
+	500 * time.Millisecond,
+	1000 * time.Millisecond,
+	1000 * time.Millisecond,
+	1000 * time.Millisecond,
+	1000 * time.Millisecond,
+}
+
+// doWithRetry retries on transient failures (network errors and retryable 5xx
+// statuses) using httpBackoff, matching the reference uploader's retry policy.
+// Non-retryable statuses (e.g. 4xx) are returned immediately for the caller to
+// surface.
 func (c *Client) doWithRetry(req *http.Request) (*http.Response, error) {
-	const maxAttempts = 5
 	var body []byte
 	if req.Body != nil {
 		b, err := io.ReadAll(req.Body)
@@ -221,8 +234,9 @@ func (c *Client) doWithRetry(req *http.Request) (*http.Response, error) {
 		req.Body.Close()
 		body = b
 	}
+	attempts := len(httpBackoff) + 1
 	var lastErr error
-	for attempt := 0; attempt < maxAttempts; attempt++ {
+	for attempt := 0; attempt < attempts; attempt++ {
 		if body != nil {
 			req.Body = io.NopCloser(bytes.NewReader(body))
 			req.ContentLength = int64(len(body))
@@ -236,16 +250,11 @@ func (c *Client) doWithRetry(req *http.Request) (*http.Response, error) {
 		} else {
 			return resp, nil
 		}
-		if attempt < maxAttempts-1 {
-			time.Sleep(backoff(attempt))
+		if attempt < len(httpBackoff) {
+			time.Sleep(httpBackoff[attempt])
 		}
 	}
 	return nil, lastErr
-}
-
-// backoff returns the delay before the next retry. Overridable for tests.
-var backoff = func(attempt int) time.Duration {
-	return time.Duration(1<<attempt) * 250 * time.Millisecond
 }
 
 func expectOK(resp *http.Response) error {

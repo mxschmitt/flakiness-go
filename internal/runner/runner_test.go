@@ -95,6 +95,10 @@ func TestRunner_EndToEnd(t *testing.T) {
 	if env.SystemData == nil || env.SystemData.OSName == "" {
 		t.Errorf("systemData missing: %+v", env.SystemData)
 	}
+	// osName must follow the Flakiness convention, not Go's GOOS.
+	if env.SystemData.OSName == "darwin" || env.SystemData.OSName == "windows" {
+		t.Errorf("osName = %q, want normalized macos/win/linux", env.SystemData.OSName)
+	}
 
 	// Find the package suite and assert the mix of statuses.
 	if len(rep.Suites) == 0 {
@@ -255,5 +259,63 @@ func TestRunner_DisableUploadWritesOnly(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(outDir, "report.json")); err != nil {
 		t.Errorf("report.json should still be written: %v", err)
+	}
+}
+
+func TestBuildEnvironment_OSNameAndFKEnv(t *testing.T) {
+	r := &Runner{
+		Cfg: &config.Config{Name: "go"},
+		Environ: func() []string {
+			return []string{
+				"FK_ENV_GPU_TYPE=H100",      // value must be lowercased
+				"fk_env_Region=  US-East  ", // case-insensitive prefix; value trimmed+lowercased
+				"PATH=/usr/bin",             // ignored
+			}
+		},
+	}
+	env := r.buildEnvironment()
+
+	// osName normalized per platform.
+	switch runtime.GOOS {
+	case "darwin":
+		if env.SystemData.OSName != "macos" {
+			t.Errorf("darwin -> osName = %q, want macos", env.SystemData.OSName)
+		}
+	case "windows":
+		if env.SystemData.OSName != "win" {
+			t.Errorf("windows -> osName = %q, want win", env.SystemData.OSName)
+		}
+	default:
+		if env.SystemData.OSName != runtime.GOOS {
+			t.Errorf("osName = %q, want %q", env.SystemData.OSName, runtime.GOOS)
+		}
+	}
+
+	if got := env.Metadata["gpu_type"]; got != "h100" {
+		t.Errorf("FK_ENV_GPU_TYPE -> %q, want lowercased h100", got)
+	}
+	if got := env.Metadata["region"]; got != "us-east" {
+		t.Errorf("case-insensitive prefix + trim/lowercase -> %q, want us-east", got)
+	}
+	if _, ok := env.Metadata["path"]; ok {
+		t.Errorf("non FK_ENV_ var leaked into metadata: %+v", env.Metadata)
+	}
+}
+
+func TestRunner_SkipsUploadOnInvalidCommit(t *testing.T) {
+	var got report.Report
+	srv := fakeFlakinessServer(t, &got)
+	cfg := &config.Config{
+		Name:        "go",
+		CommitID:    "v1.2.3", // not a SHA, and not resolvable as a ref here
+		AccessToken: "secret",
+		Endpoint:    srv.URL,
+	}
+	_, _, errb := runStdin(t, cfg, sampleStream)
+	if got.CommitID != "" {
+		t.Errorf("should not have uploaded an invalid-commit report; server saw %q", got.CommitID)
+	}
+	if !strings.Contains(errb.String(), "not a 40-char SHA") {
+		t.Errorf("expected invalid-SHA warning, stderr = %q", errb.String())
 	}
 }

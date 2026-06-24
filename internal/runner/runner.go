@@ -13,6 +13,7 @@ import (
 
 	"github.com/mxschmitt/flakiness-go/internal/ci"
 	"github.com/mxschmitt/flakiness-go/internal/config"
+	"github.com/mxschmitt/flakiness-go/internal/gitinfo"
 	"github.com/mxschmitt/flakiness-go/internal/gotest"
 	"github.com/mxschmitt/flakiness-go/internal/oidc"
 	"github.com/mxschmitt/flakiness-go/internal/upload"
@@ -73,11 +74,11 @@ func (r *Runner) Run() (int, error) {
 	}
 
 	if !r.Cfg.DisableUpload {
-		// A report with an empty commitId is rejected by the spec (commitId is
-		// required and must be a 40-char SHA), so don't upload one — but the
-		// local report is still written above for inspection.
-		if r.Cfg.CommitID == "" {
-			fmt.Fprintln(r.Stderr, "[Flakiness] Warning: no commit id resolved; skipping upload (set --flakiness-commit-id or run inside a git repo)")
+		// The spec requires commitId to be a full 40-char SHA. Don't upload a
+		// report that would be rejected — but the local report is still written
+		// above for inspection.
+		if !gitinfo.IsFullSHA(rep.CommitID) {
+			fmt.Fprintf(r.Stderr, "[Flakiness] Warning: commit id %q is not a 40-char SHA; skipping upload (set --flakiness-commit-id or run inside a git repo)\n", rep.CommitID)
 		} else {
 			r.maybeUpload(&rep)
 		}
@@ -125,7 +126,7 @@ func (r *Runner) runGoTest(conv *gotest.Converter) (int, error) {
 
 func (r *Runner) fillMetadata(rep *report.Report) {
 	rep.Category = r.Cfg.Name
-	rep.CommitID = r.Cfg.CommitID
+	rep.CommitID = r.normalizedCommit()
 	rep.Title = r.Cfg.Title
 	if r.Cfg.Project != "" {
 		rep.FlakinessProject = r.Cfg.Project
@@ -143,7 +144,7 @@ func (r *Runner) buildEnvironment() report.Environment {
 	env := report.Environment{
 		Name: r.Cfg.Name,
 		SystemData: &report.SystemData{
-			OSName: runtime.GOOS,
+			OSName: osName(),
 			OSArch: runtime.GOARCH,
 		},
 		Metadata: map[string]any{
@@ -157,11 +158,45 @@ func (r *Runner) buildEnvironment() report.Environment {
 			continue
 		}
 		k, v := kv[:eq], kv[eq+1:]
-		if strings.HasPrefix(k, prefix) {
-			env.Metadata[strings.ToLower(strings.TrimPrefix(k, prefix))] = v
+		if strings.HasPrefix(strings.ToUpper(k), prefix) {
+			// Match the canonical Node SDK (createEnvironment.ts): the key has
+			// its prefix stripped and is lowercased, and the VALUE is trimmed
+			// and lowercased too. Keeping these in lockstep matters because the
+			// server dedups environments by a hash of the whole object and FQL
+			// queries match on these normalized values.
+			key := strings.ToLower(k[len(prefix):])
+			env.Metadata[key] = strings.ToLower(strings.TrimSpace(v))
 		}
 	}
 	return env
+}
+
+// normalizedCommit returns the best available commit SHA: a full 40-char SHA is
+// used as-is; anything else (short SHA, ref, tag) is expanded via git when
+// possible. The raw value is returned otherwise so it is still recorded locally
+// and the upload gate can warn that it isn't a valid SHA.
+func (r *Runner) normalizedCommit() string {
+	c := r.Cfg.CommitID
+	if c == "" || gitinfo.IsFullSHA(c) {
+		return c
+	}
+	if full := gitinfo.ExpandCommit(c); full != "" {
+		return full
+	}
+	return c
+}
+
+// osName maps Go's GOOS to the Flakiness.io osName convention used by the other
+// reporters (so FQL filters like `osName == "macos"` match across languages).
+func osName() string {
+	switch runtime.GOOS {
+	case "darwin":
+		return "macos"
+	case "windows":
+		return "win"
+	default:
+		return runtime.GOOS
+	}
 }
 
 func (r *Runner) maybeUpload(rep *report.Report) {

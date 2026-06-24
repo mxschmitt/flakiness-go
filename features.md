@@ -8,9 +8,9 @@ feature — they are not gaps in this reporter so much as in the runner's output
 | # | Feature | Status | Notes |
 |---|---------|--------|-------|
 | 1 | Report metadata | ✅ | `commitId` from git HEAD, CI run URL auto-detected (GitHub Actions / Azure DevOps / GitLab `CI_JOB_URL` / Jenkins `BUILD_URL`), start time & duration from the event stream. `generatedBy` = `flakiness-go`, `testRunner` = `go test`, `runtime` = `go`. `configPath` N/A (Go has no single test config file). `relatedCommitIds` not populated. |
-| 2 | Environment metadata | ✅ | `name`, `osName` (GOOS), `osArch` (GOARCH), `go_version`. `osVersion` omitted (not cheaply available cross-platform). |
+| 2 | Environment metadata | ✅ | `name`, `osName` (normalized to the Flakiness convention — `darwin`→`macos`, `windows`→`win`, else GOOS — so FQL filters match other reporters), `osArch` (GOARCH), `go_version`. `osVersion` omitted (not cheaply available cross-platform). |
 | 3 | Multiple environments | N/A | `go test` runs one toolchain/GOOS/GOARCH per invocation; a single `environments[]` entry is emitted. Matrix shards are separate runs/reports. |
-| 4 | Custom environments (`FK_ENV_*`) | ✅ | `FK_ENV_*` variables are parsed into `environment.metadata` (prefix stripped, lowercased). |
+| 4 | Custom environments (`FK_ENV_*`) | ✅ | `FK_ENV_*` variables are parsed into `environment.metadata`: prefix matched case-insensitively, key lowercased, value trimmed + lowercased (matching the Node SDK so environments hash-dedup and FQL-match across reporters). |
 | 5 | Test hierarchy / suites | ✅ | Each package → a `file` suite (titled by import path). Subtests (`TestX/a/b`) → nested `suite` nodes per path segment; leaves are tests. A parent test that itself fails/panics (not just its subtests) keeps its own attempt as a leaf test inside its suite, so its error is not lost. |
 | 6 | Per-attempt reporting (retries) | ✅ | Re-runs of the same test (e.g. `-count=N`) each emit their own `RunAttempt` with independent status/duration/errors. |
 | 7 | Per-attempt timeout | N/A | `go test -timeout` is a single whole-binary deadline, not exposed as a per-test value in the `-json` stream, so `RunAttempt.timeout` is not set. (A test killed by that deadline is still *classified* as `timedOut` — see #status mapping below.) |

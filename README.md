@@ -110,7 +110,8 @@ default**. Any flag not listed here is forwarded to `go test`.
 ### Custom environment data
 
 `FK_ENV_*` variables are recorded into the report's environment metadata (prefix
-stripped, lowercased): `FK_ENV_GPU_TYPE=H100` becomes `gpu_type: "H100"`.
+stripped and key + value lowercased/trimmed, matching the other Flakiness
+reporters): `FK_ENV_GPU_TYPE=H100` becomes `gpu_type: "h100"`.
 
 ## How it maps `go test` to the report
 

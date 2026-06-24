@@ -40,3 +40,37 @@ func TestRoot(t *testing.T) {
 		t.Errorf("Root() = %q, want an absolute path", r)
 	}
 }
+
+func TestIsFullSHA(t *testing.T) {
+	valid := "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+	if !IsFullSHA(valid) {
+		t.Errorf("IsFullSHA(%q) = false, want true", valid)
+	}
+	for _, bad := range []string{
+		"",
+		"deadbeef", // short
+		"DEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEF", // uppercase
+		"v1.2.3", // tag
+		"deadbeefdeadbeefdeadbeefdeadbeefdeadbeefx", // 41 / non-hex
+		"zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz",  // non-hex
+	} {
+		if IsFullSHA(bad) {
+			t.Errorf("IsFullSHA(%q) = true, want false", bad)
+		}
+	}
+}
+
+func TestExpandCommit(t *testing.T) {
+	if !hasGit() || Commit() == "" {
+		t.Skip("not in a git repo")
+	}
+	full := Commit()
+	// A short prefix of HEAD should expand back to the full SHA.
+	short := full[:8]
+	if got := ExpandCommit(short); got != full {
+		t.Errorf("ExpandCommit(%q) = %q, want %q", short, got, full)
+	}
+	if got := ExpandCommit("definitely-not-a-ref-xyz"); got != "" {
+		t.Errorf("ExpandCommit(bogus) = %q, want empty", got)
+	}
+}
