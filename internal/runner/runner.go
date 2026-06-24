@@ -65,10 +65,6 @@ func (r *Runner) Run() (int, error) {
 	rep := conv.Build()
 	r.fillMetadata(&rep)
 
-	if r.Cfg.CommitID == "" {
-		fmt.Fprintln(r.Stderr, "[Flakiness] Warning: no commit id resolved; report.commitId will be empty")
-	}
-
 	if r.Cfg.OutputDir != "" {
 		if err := report.WriteDir(&rep, r.Cfg.OutputDir); err != nil {
 			return testExit, fmt.Errorf("writing report: %w", err)
@@ -77,14 +73,24 @@ func (r *Runner) Run() (int, error) {
 	}
 
 	if !r.Cfg.DisableUpload {
-		r.maybeUpload(&rep)
+		// A report with an empty commitId is rejected by the spec (commitId is
+		// required and must be a 40-char SHA), so don't upload one — but the
+		// local report is still written above for inspection.
+		if r.Cfg.CommitID == "" {
+			fmt.Fprintln(r.Stderr, "[Flakiness] Warning: no commit id resolved; skipping upload (set --flakiness-commit-id or run inside a git repo)")
+		} else {
+			r.maybeUpload(&rep)
+		}
 	}
 
 	return testExit, nil
 }
 
-// runGoTest runs `go test -json <args>`, tees the stream into the converter,
-// and returns go test's exit code.
+// runGoTest runs `go test -json <args>`, feeds the event stream into the
+// converter, and returns go test's exit code. Each decoded `output` event is
+// re-emitted to stdout so the developer still sees normal, human-readable
+// `go test` output (the concatenation of all output events is exactly the
+// original test output) rather than a silent run or raw JSON.
 func (r *Runner) runGoTest(conv *gotest.Converter) (int, error) {
 	args := append([]string{"test", "-json"}, r.Cfg.GoTestArgs...)
 	cmd := exec.Command("go", args...)
@@ -97,7 +103,12 @@ func (r *Runner) runGoTest(conv *gotest.Converter) (int, error) {
 		return 1, err
 	}
 
-	decodeErr := gotest.DecodeStream(stdout, conv.Process)
+	decodeErr := gotest.DecodeStream(stdout, func(ev gotest.TestEvent) error {
+		if ev.Action == gotest.ActionOutput && r.Stdout != nil {
+			io.WriteString(r.Stdout, ev.Output)
+		}
+		return conv.Process(ev)
+	})
 
 	waitErr := cmd.Wait()
 	if decodeErr != nil {

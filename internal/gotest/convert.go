@@ -30,6 +30,13 @@ type testAcc struct {
 	cur      *attempt
 }
 
+func (ta *testAcc) lastAttempt() *attempt {
+	if len(ta.attempts) == 0 {
+		return nil
+	}
+	return ta.attempts[len(ta.attempts)-1]
+}
+
 // Converter turns a `go test -json` event stream into a report.Report.
 //
 // It is fed events via Process (in stream order) and produces the report with
@@ -96,11 +103,20 @@ func (c *Converter) Process(ev TestEvent) error {
 		ta.cur = &attempt{start: ev.Time}
 		ta.attempts = append(ta.attempts, ta.cur)
 	case ActionOutput:
-		if ta.cur == nil {
-			ta.cur = &attempt{start: ev.Time}
-			ta.attempts = append(ta.attempts, ta.cur)
+		// Output normally arrives between `run` and the terminal event. Any
+		// output that arrives *after* the terminal event (rare, but possible
+		// for trailing summary lines) is appended to the just-finished attempt
+		// rather than fabricating a spurious new one.
+		dst := ta.cur
+		if dst == nil {
+			dst = ta.lastAttempt()
 		}
-		ta.cur.output.WriteString(ev.Output)
+		if dst == nil {
+			dst = &attempt{start: ev.Time}
+			ta.attempts = append(ta.attempts, dst)
+			ta.cur = dst
+		}
+		dst.output.WriteString(ev.Output)
 	case ActionPass, ActionFail, ActionSkip, ActionBench:
 		if ta.cur == nil {
 			ta.cur = &attempt{start: ev.Time}
@@ -166,6 +182,11 @@ type node struct {
 	children map[string]*node
 	order    []string // child titles in insertion order
 	test     *testAcc // set on leaf nodes that map to a test
+	// own is the accumulator for a parent test that ALSO ran in its own right
+	// (e.g. a `t.Run` group that itself fails via t.Error or panics). Such a
+	// test becomes a suite for its subtests, but its own attempts must not be
+	// lost — they are emitted as a leaf test inside the suite.
+	own *testAcc
 }
 
 func newNode(title string) *node {
@@ -202,13 +223,12 @@ func (c *Converter) Build() report.Report {
 	}
 
 	// Build a package -> suite tree. Leaf (non-parent) tests become Tests,
-	// nested under suite segments derived from their "/"-separated name.
+	// nested under suite segments derived from their "/"-separated name. A
+	// parent test (one whose name prefixes a deeper test) becomes a suite; if
+	// it also has its own attempts, they're preserved on node.own.
 	root := newNode("")
 	for _, k := range c.order {
 		ta := c.tests[k]
-		if parents[k] {
-			continue // parent aggregate test is represented by its child suite
-		}
 		pkgNode := root.child(ta.pkg)
 		pkgNode.isPkg = true
 		pkgNode.pkg = ta.pkg
@@ -221,7 +241,12 @@ func (c *Converter) Build() report.Report {
 		}
 		leaf := cur.child(segments[len(segments)-1])
 		leaf.pkg = ta.pkg
-		leaf.test = ta
+		if parents[k] {
+			// The parent test maps to this suite node; keep its own run data.
+			leaf.own = ta
+		} else {
+			leaf.test = ta
+		}
 	}
 
 	var rep report.Report
@@ -247,13 +272,32 @@ func (c *Converter) buildSuite(n *node, typ report.SuiteType) report.Suite {
 	}
 	for _, childTitle := range n.order {
 		child := n.children[childTitle]
-		if child.test != nil && len(child.children) == 0 {
+		if len(child.children) == 0 && child.test != nil {
 			s.Tests = append(s.Tests, c.buildTest(child))
 		} else {
 			s.Suites = append(s.Suites, c.buildSuite(child, report.SuiteNamed))
 		}
 	}
+	// Preserve a parent test's own outcome (e.g. it failed via t.Error or
+	// panicked) as a leaf test inside its suite, so it isn't lost. Skip it when
+	// the parent merely passed as an aggregate of its subtests, to avoid noise.
+	if n.own != nil && testCarriesSignal(n.own) {
+		t := c.buildTestFrom(n.title, n.pkg, topLevelFunc(n), n.own)
+		s.Tests = append(s.Tests, t)
+	}
 	return s
+}
+
+// testCarriesSignal reports whether a parent test's own attempts contain
+// anything worth surfacing (a non-passing outcome). A parent that only passed
+// is an aggregate of its subtests and adds no information of its own.
+func testCarriesSignal(ta *testAcc) bool {
+	for _, a := range ta.attempts {
+		if a.status != "" && a.status != report.StatusPassed {
+			return true
+		}
+	}
+	return false
 }
 
 // topLevelFunc returns the top-level test function name for a suite node, used
@@ -268,12 +312,16 @@ func topLevelFunc(n *node) string {
 }
 
 func (c *Converter) buildTest(n *node) report.Test {
-	ta := n.test
-	t := report.Test{Title: n.title}
-	if c.Locator != nil {
-		if fn := topLevelFunc(n); fn != "" {
-			t.Location = c.Locator.Locate(ta.pkg, fn)
-		}
+	return c.buildTestFrom(n.title, n.pkg, topLevelFunc(n), n.test)
+}
+
+// buildTestFrom builds a report.Test from an accumulator. locFunc, when
+// non-empty, is the top-level test function name used to resolve a source
+// location.
+func (c *Converter) buildTestFrom(title, pkg, locFunc string, ta *testAcc) report.Test {
+	t := report.Test{Title: title}
+	if c.Locator != nil && locFunc != "" {
+		t.Location = c.Locator.Locate(pkg, locFunc)
 	}
 	for _, a := range ta.attempts {
 		t.Attempts = append(t.Attempts, c.buildAttempt(a))
@@ -292,7 +340,16 @@ func (c *Converter) buildTest(n *node) report.Test {
 func (c *Converter) buildAttempt(a *attempt) report.RunAttempt {
 	status := a.status
 	if status == "" {
-		status = report.StatusInterrupted
+		// No terminal event was seen for this attempt. When `go test -timeout`
+		// kills a hung test, the runner panics with a "test timed out" banner
+		// (attributed to the test) but emits no per-test `fail` event — only
+		// the package fails. Detect that here so the attempt is reported as
+		// timedOut rather than a generic interruption.
+		if isTimeout(a.output.String()) {
+			status = report.StatusTimedOut
+		} else {
+			status = report.StatusInterrupted
+		}
 	}
 	ra := report.RunAttempt{
 		EnvironmentIdx: 0,

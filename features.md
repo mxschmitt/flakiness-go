@@ -11,9 +11,9 @@ feature — they are not gaps in this reporter so much as in the runner's output
 | 2 | Environment metadata | ✅ | `name`, `osName` (GOOS), `osArch` (GOARCH), `go_version`. `osVersion` omitted (not cheaply available cross-platform). |
 | 3 | Multiple environments | N/A | `go test` runs one toolchain/GOOS/GOARCH per invocation; a single `environments[]` entry is emitted. Matrix shards are separate runs/reports. |
 | 4 | Custom environments (`FK_ENV_*`) | ✅ | `FK_ENV_*` variables are parsed into `environment.metadata` (prefix stripped, lowercased). |
-| 5 | Test hierarchy / suites | ✅ | Each package → a `file` suite (titled by import path). Subtests (`TestX/a/b`) → nested `suite` nodes per path segment; leaves are tests. |
+| 5 | Test hierarchy / suites | ✅ | Each package → a `file` suite (titled by import path). Subtests (`TestX/a/b`) → nested `suite` nodes per path segment; leaves are tests. A parent test that itself fails/panics (not just its subtests) keeps its own attempt as a leaf test inside its suite, so its error is not lost. |
 | 6 | Per-attempt reporting (retries) | ✅ | Re-runs of the same test (e.g. `-count=N`) each emit their own `RunAttempt` with independent status/duration/errors. |
-| 7 | Per-attempt timeout | N/A | `go test -timeout` is a single whole-binary deadline, not exposed per test in the `-json` stream. |
+| 7 | Per-attempt timeout | N/A | `go test -timeout` is a single whole-binary deadline, not exposed as a per-test value in the `-json` stream, so `RunAttempt.timeout` is not set. (A test killed by that deadline is still *classified* as `timedOut` — see #status mapping below.) |
 | 8 | Test steps | N/A | Go has no native step concept. |
 | 9 | Expected status (`expectedStatus`) | N/A | Go has no "expected to fail" mechanism; `expectedStatus` is always `passed`. |
 | 10 | Attachments | N/A | Go has no native attachment mechanism. The upload path supports attachments for future use. |
@@ -31,4 +31,21 @@ feature — they are not gaps in this reporter so much as in the runner's output
 | 22 | Source locations | ✅ | Top-level `TestXxx`/`Example`/`Benchmark`/`Fuzz` functions are located by parsing `*_test.go` with `go/ast`. Subtests are created at runtime and have no static location. |
 | 23 | Auto-upload | ✅ | GitHub OIDC (via `FLAKINESS_PROJECT`), `FLAKINESS_ACCESS_TOKEN`, and `FLAKINESS_DISABLE_UPLOAD` / `--flakiness-disable-upload` opt-out. |
 | 24 | CPU / RAM telemetry | ❌ | System telemetry is not collected. |
-| 25 | Duplicate-name handling | ⚠️ | `go test` does not allow two tests with the same name in one package, so in-package collisions can't occur. Cross-package names are disambiguated by the package (file) suite. Re-runs are intentionally merged as attempts (feature 6). |
+| 25 | Duplicate-name handling | ⚠️ | `go test` auto-disambiguates duplicate subtest names (a second `t.Run("x", …)` becomes `x#01`), so in-package collisions can't reach the converter. Cross-package names are disambiguated by the package (file) suite. Re-runs are intentionally merged as attempts (feature 6). |
+
+## Status mapping
+
+`go test -json` actions map to attempt statuses as follows:
+
+| go test signal | status |
+|---|---|
+| `pass`, `bench` | `passed` |
+| `skip` | `skipped` (with a `skip` annotation carrying the `t.Skip` reason) |
+| `fail` | `failed` |
+| test killed by `-timeout` (panic banner, no per-test terminal event) | `timedOut` |
+| `run` with no terminal event (binary crashed/aborted) | `interrupted` |
+
+When `go test -timeout` fires, the runner prints a `panic: test timed out`
+banner attributed to the hung test but emits **no** per-test `pass`/`fail`
+event (only the package fails). The converter detects that banner on an
+otherwise-unterminated attempt and reports `timedOut` rather than `interrupted`.

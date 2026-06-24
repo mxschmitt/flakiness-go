@@ -3,10 +3,16 @@ package runner
 import (
 	"bytes"
 	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
+
+	"github.com/andybalholm/brotli"
 
 	"github.com/mxschmitt/flakiness-go/internal/config"
 	"github.com/mxschmitt/flakiness-go/report"
@@ -141,5 +147,113 @@ func TestRunner_EndToEnd(t *testing.T) {
 	findLoc(pkg)
 	if !located {
 		t.Error("expected at least one test with a resolved source location")
+	}
+}
+
+// fakeFlakinessServer implements the 4-step upload protocol and records the
+// uploaded report.
+func fakeFlakinessServer(t *testing.T, gotReport *report.Report) *httptest.Server {
+	t.Helper()
+	mux := http.NewServeMux()
+	srv := httptest.NewServer(mux)
+	mux.HandleFunc("/api/upload/start", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]string{
+			"uploadToken":        "utok",
+			"presignedReportUrl": srv.URL + "/put",
+			"webUrl":             "/org/proj/run/1",
+		})
+	})
+	mux.HandleFunc("/put", func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(brotli.NewReader(r.Body))
+		json.Unmarshal(body, gotReport)
+		w.WriteHeader(200)
+	})
+	mux.HandleFunc("/api/upload/finish", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(200) })
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func runStdin(t *testing.T, cfg *config.Config, stream string) (*Runner, *bytes.Buffer, *bytes.Buffer) {
+	t.Helper()
+	cfg.Stdin = true
+	out, errb := &bytes.Buffer{}, &bytes.Buffer{}
+	r := &Runner{
+		Cfg:     cfg,
+		Stdin:   strings.NewReader(stream),
+		Stdout:  out,
+		Stderr:  errb,
+		Getenv:  func(string) string { return "" },
+		Environ: func() []string { return nil },
+	}
+	if _, err := r.Run(); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	return r, out, errb
+}
+
+const sampleStream = `
+{"Time":"2024-01-01T00:00:00Z","Action":"run","Package":"ex/pkg","Test":"TestA"}
+{"Time":"2024-01-01T00:00:01Z","Action":"pass","Package":"ex/pkg","Test":"TestA","Elapsed":0.1}
+`
+
+func TestRunner_UploadsWithToken(t *testing.T) {
+	var got report.Report
+	srv := fakeFlakinessServer(t, &got)
+	cfg := &config.Config{
+		Name:        "go",
+		CommitID:    "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+		AccessToken: "secret",
+		Endpoint:    srv.URL,
+		Project:     "max/flakiness-go",
+		// no OutputDir: exercise upload-only
+	}
+	_, _, errb := runStdin(t, cfg, sampleStream)
+	if got.CommitID != cfg.CommitID {
+		t.Errorf("uploaded report commitId = %q, want %q", got.CommitID, cfg.CommitID)
+	}
+	if got.Category != "go" {
+		t.Errorf("uploaded category = %q", got.Category)
+	}
+	if !strings.Contains(errb.String(), "uploaded") {
+		t.Errorf("expected upload confirmation, stderr = %q", errb.String())
+	}
+}
+
+func TestRunner_SkipsUploadWhenNoCommit(t *testing.T) {
+	var got report.Report
+	srv := fakeFlakinessServer(t, &got)
+	cfg := &config.Config{
+		Name:        "go",
+		CommitID:    "", // unresolved
+		AccessToken: "secret",
+		Endpoint:    srv.URL,
+	}
+	_, _, errb := runStdin(t, cfg, sampleStream)
+	if got.CommitID != "" {
+		t.Errorf("should not have uploaded; server saw commitId %q", got.CommitID)
+	}
+	if !strings.Contains(errb.String(), "skipping upload") {
+		t.Errorf("expected skip-upload warning, stderr = %q", errb.String())
+	}
+}
+
+func TestRunner_DisableUploadWritesOnly(t *testing.T) {
+	var got report.Report
+	srv := fakeFlakinessServer(t, &got)
+	outDir := filepath.Join(t.TempDir(), "rep")
+	cfg := &config.Config{
+		Name:          "go",
+		CommitID:      "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+		AccessToken:   "secret",
+		Endpoint:      srv.URL,
+		OutputDir:     outDir,
+		DisableUpload: true,
+	}
+	runStdin(t, cfg, sampleStream)
+	if got.CommitID != "" {
+		t.Errorf("disable-upload should not upload; server saw %q", got.CommitID)
+	}
+	if _, err := os.Stat(filepath.Join(outDir, "report.json")); err != nil {
+		t.Errorf("report.json should still be written: %v", err)
 	}
 }

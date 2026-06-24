@@ -69,8 +69,11 @@ type TestEvent struct {
 This is the integration point. Two ways to obtain the stream, both supported:
 
 1. **Wrapper mode** (default): `flakiness-go [go-test-args...]` runs
-   `go test -json <args>` itself, tees the stream to its own stdout (so the
-   developer still sees normal output via a re-render) and to the parser.
+   `go test -json <args>` itself and feeds the event stream to the parser. As
+   it decodes, it re-emits each `output` event's text to its own stdout — the
+   concatenation of those events is exactly the original `go test` output — so
+   the developer still sees normal, human-readable test output rather than raw
+   JSON.
 2. **Stdin mode**: `go test -json ./... | flakiness-go --stdin`. Useful when the
    user wants full control over the `go test` invocation, or in CI.
 

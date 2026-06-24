@@ -120,8 +120,9 @@ func TestConvert_Subtests(t *testing.T) {
 	if group.Type != report.SuiteNamed {
 		t.Errorf("subtest suite type = %q, want suite", group.Type)
 	}
-	if len(group.Tests) != 2 {
-		t.Fatalf("TestGroup should have 2 leaf tests, got %d", len(group.Tests))
+	// Two subtests, plus TestGroup's own failing attempt preserved as a leaf.
+	if len(group.Tests) != 3 {
+		t.Fatalf("TestGroup should have 3 leaf tests (2 subtests + own), got %d", len(group.Tests))
 	}
 	a := findTest(group, "sub_a")
 	b := findTest(group, "sub_b")
@@ -130,6 +131,46 @@ func TestConvert_Subtests(t *testing.T) {
 	}
 	if b == nil || b.Attempts[0].Status != report.StatusFailed {
 		t.Errorf("sub_b wrong: %+v", b)
+	}
+	// The parent's own direct failure must not be lost.
+	own := findTest(group, "TestGroup")
+	if own == nil || own.Attempts[0].Status != report.StatusFailed {
+		t.Errorf("TestGroup's own failing attempt should be preserved: %+v", own)
+	}
+}
+
+func TestConvert_PassingParentNotDuplicated(t *testing.T) {
+	// A parent that only passes (aggregate of subtests) should NOT be emitted
+	// as its own leaf test — that would be noise.
+	stream := `
+{"Time":"2024-01-01T00:00:00Z","Action":"run","Package":"ex/pkg","Test":"TestGroup"}
+{"Time":"2024-01-01T00:00:00Z","Action":"run","Package":"ex/pkg","Test":"TestGroup/sub"}
+{"Time":"2024-01-01T00:00:01Z","Action":"pass","Package":"ex/pkg","Test":"TestGroup/sub","Elapsed":0.1}
+{"Time":"2024-01-01T00:00:01Z","Action":"pass","Package":"ex/pkg","Test":"TestGroup","Elapsed":0.1}
+`
+	rep := decode(t, stream)
+	suite := findSuite(t, rep, "ex/pkg")
+	group := suite.Suites[0]
+	if len(group.Tests) != 1 || group.Tests[0].Title != "sub" {
+		t.Fatalf("passing parent should yield only the subtest, got %+v", group.Tests)
+	}
+}
+
+func TestConvert_PrefixCollisionNotParent(t *testing.T) {
+	// TestFoo must not be treated as a parent of TestFooBar (no slash boundary).
+	stream := `
+{"Time":"2024-01-01T00:00:00Z","Action":"run","Package":"ex/pkg","Test":"TestFoo"}
+{"Time":"2024-01-01T00:00:01Z","Action":"pass","Package":"ex/pkg","Test":"TestFoo","Elapsed":0.1}
+{"Time":"2024-01-01T00:00:01Z","Action":"run","Package":"ex/pkg","Test":"TestFooBar"}
+{"Time":"2024-01-01T00:00:02Z","Action":"pass","Package":"ex/pkg","Test":"TestFooBar","Elapsed":0.1}
+`
+	rep := decode(t, stream)
+	suite := findSuite(t, rep, "ex/pkg")
+	if len(suite.Tests) != 2 {
+		t.Fatalf("both tests should be leaves, got %d tests / %d suites", len(suite.Tests), len(suite.Suites))
+	}
+	if findTest(suite, "TestFoo") == nil || findTest(suite, "TestFooBar") == nil {
+		t.Errorf("expected both TestFoo and TestFooBar as leaf tests")
 	}
 }
 
@@ -153,16 +194,42 @@ func TestConvert_MultipleAttempts(t *testing.T) {
 }
 
 func TestConvert_Timeout(t *testing.T) {
+	// Mirrors REAL `go test -timeout` output: the runner panics with a
+	// "test timed out" banner attributed to the hung test, then the PACKAGE
+	// fails — there is no per-test terminal event. The test must still be
+	// classified as timedOut (not interrupted).
 	stream := `
 {"Time":"2024-01-01T00:00:00Z","Action":"run","Package":"ex/pkg","Test":"TestSlow"}
-{"Time":"2024-01-01T00:00:01Z","Action":"output","Package":"ex/pkg","Test":"TestSlow","Output":"panic: test timed out after 30s\n"}
-{"Time":"2024-01-01T00:00:01Z","Action":"fail","Package":"ex/pkg","Test":"TestSlow","Elapsed":30}
+{"Time":"2024-01-01T00:00:01Z","Action":"output","Package":"ex/pkg","Test":"TestSlow","Output":"=== RUN   TestSlow\n"}
+{"Time":"2024-01-01T00:00:01Z","Action":"output","Package":"ex/pkg","Test":"TestSlow","Output":"panic: test timed out after 1s\n"}
+{"Time":"2024-01-01T00:00:01Z","Action":"output","Package":"ex/pkg","Test":"TestSlow","Output":"\trunning tests:\n"}
+{"Time":"2024-01-01T00:00:01Z","Action":"output","Package":"ex/pkg","Output":"FAIL\n"}
+{"Time":"2024-01-01T00:00:01Z","Action":"fail","Package":"ex/pkg","Elapsed":1.2}
 `
 	rep := decode(t, stream)
 	suite := findSuite(t, rep, "ex/pkg")
 	tc := findTest(suite, "TestSlow")
 	if tc == nil || tc.Attempts[0].Status != report.StatusTimedOut {
 		t.Errorf("want timedOut, got %+v", tc)
+	}
+}
+
+func TestConvert_OutputAfterTerminal(t *testing.T) {
+	// Defensive: trailing output after a terminal event must attach to the
+	// finished attempt, NOT fabricate a spurious extra (interrupted) attempt.
+	stream := `
+{"Time":"2024-01-01T00:00:00Z","Action":"run","Package":"ex/pkg","Test":"TestX"}
+{"Time":"2024-01-01T00:00:01Z","Action":"pass","Package":"ex/pkg","Test":"TestX","Elapsed":0.1}
+{"Time":"2024-01-01T00:00:01Z","Action":"output","Package":"ex/pkg","Test":"TestX","Output":"trailing line\n"}
+`
+	rep := decode(t, stream)
+	suite := findSuite(t, rep, "ex/pkg")
+	tc := findTest(suite, "TestX")
+	if tc == nil || len(tc.Attempts) != 1 {
+		t.Fatalf("want exactly 1 attempt (no phantom), got %+v", tc)
+	}
+	if tc.Attempts[0].Status != report.StatusPassed {
+		t.Errorf("status = %q, want passed", tc.Attempts[0].Status)
 	}
 }
 
