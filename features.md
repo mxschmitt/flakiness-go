@@ -27,7 +27,7 @@ feature — they are not gaps in this reporter so much as in the runner's output
 | 18 | Sources | ❌ | Top-level `sources[]` is not populated (no steps to anchor; locations link to git source). |
 | 19 | Error snippets | ❌ | `go test` emits plain failure text without ANSI-highlighted code excerpts. |
 | 20 | Errors support | ✅ | Failures are captured as a `ReportError` with a message synthesized from the test's output. Go surfaces a single aggregate failure per test, so one error per attempt. |
-| 21 | Unattributed errors | ❌ | Package build/setup failures are not yet surfaced as `unattributedErrors`. |
+| 21 | Unattributed errors | ✅ | A package that fails with no test results — compile/build failure (the `build-output`/`FailedBuild` diagnostics are captured), `init()`/`TestMain` panic, or setup failure — becomes a report-level `unattributedError` with the failure output, instead of vanishing. |
 | 22 | Source locations | ✅ | Top-level `TestXxx`/`Example`/`Benchmark`/`Fuzz` functions are located by parsing `*_test.go` with `go/ast`. Subtests are created at runtime and have no static location. |
 | 23 | Auto-upload | ✅ | GitHub OIDC (via `FLAKINESS_PROJECT`), `FLAKINESS_ACCESS_TOKEN`, and `FLAKINESS_DISABLE_UPLOAD` / `--flakiness-disable-upload` opt-out. |
 | 24 | CPU / RAM telemetry | ❌ | System telemetry is not collected. |

@@ -90,6 +90,8 @@ This is the integration point. Two ways to obtain the stream, both supported:
 | `output` events                     | appended to the attempt's `stdout`              |
 | `fail` with collected output        | a `ReportError{ message }` synthesized from output |
 | package without tests (`skip`)      | suite with no tests (dropped)                   |
+| package `fail` with no test events  | a report-level `unattributedError` (build failure / init panic / setup) |
+| `build-output` + `FailedBuild`      | compile diagnostics captured into that `unattributedError` |
 
 Status mapping:
 

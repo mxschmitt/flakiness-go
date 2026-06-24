@@ -278,3 +278,64 @@ func TestConvert_Interrupted(t *testing.T) {
 		t.Errorf("want interrupted, got %+v", tc)
 	}
 }
+
+func TestConvert_BuildFailure(t *testing.T) {
+	// Real `go test -json` output for a package that fails to compile: the
+	// diagnostics arrive as build-output keyed by ImportPath, then the package
+	// fails with FailedBuild and no test events.
+	stream := `
+{"ImportPath":"bf.test","Action":"build-output","Output":"# bf\n"}
+{"ImportPath":"bf.test","Action":"build-output","Output":"b_test.go:6:7: expected ';', found is\n"}
+{"ImportPath":"bf.test","Action":"build-fail"}
+{"Action":"start","Package":"bf"}
+{"Action":"output","Package":"bf","Output":"FAIL\tbf [setup failed]\n"}
+{"Action":"fail","Package":"bf","Elapsed":0,"FailedBuild":"bf.test"}
+`
+	rep := decode(t, stream)
+	if len(rep.Suites) != 0 {
+		t.Errorf("build failure should produce no suites, got %d", len(rep.Suites))
+	}
+	if len(rep.UnattributedError) != 1 {
+		t.Fatalf("want 1 unattributed error, got %d: %+v", len(rep.UnattributedError), rep.UnattributedError)
+	}
+	ue := rep.UnattributedError[0]
+	if !strings.Contains(ue.Message, "bf") || !strings.Contains(ue.Message, "build failed") {
+		t.Errorf("message = %q, want it to mention bf / build failed", ue.Message)
+	}
+	if !strings.Contains(ue.Stack, "expected ';', found is") {
+		t.Errorf("stack should carry the compiler diagnostic, got %q", ue.Stack)
+	}
+}
+
+func TestConvert_SetupPanic(t *testing.T) {
+	// An init()/TestMain panic fails the package with package-level output and
+	// no test events.
+	stream := `
+{"Time":"2024-01-01T00:00:00Z","Action":"start","Package":"sf"}
+{"Time":"2024-01-01T00:00:00Z","Action":"output","Package":"sf","Output":"panic: boom in init\n"}
+{"Time":"2024-01-01T00:00:00Z","Action":"output","Package":"sf","Output":"FAIL\tsf\t0.46s\n"}
+{"Time":"2024-01-01T00:00:00Z","Action":"fail","Package":"sf","Elapsed":0.46}
+`
+	rep := decode(t, stream)
+	if len(rep.UnattributedError) != 1 {
+		t.Fatalf("want 1 unattributed error, got %+v", rep.UnattributedError)
+	}
+	if !strings.Contains(rep.UnattributedError[0].Stack, "boom in init") {
+		t.Errorf("stack should carry the panic output, got %q", rep.UnattributedError[0].Stack)
+	}
+}
+
+func TestConvert_FailingPackageWithTestsNotUnattributed(t *testing.T) {
+	// A package that fails because a test failed must NOT also produce an
+	// unattributed error — the failure is already attributed to the test.
+	stream := `
+{"Time":"2024-01-01T00:00:00Z","Action":"run","Package":"ex/pkg","Test":"TestFail"}
+{"Time":"2024-01-01T00:00:01Z","Action":"fail","Package":"ex/pkg","Test":"TestFail","Elapsed":0.1}
+{"Time":"2024-01-01T00:00:01Z","Action":"output","Package":"ex/pkg","Output":"FAIL\n"}
+{"Time":"2024-01-01T00:00:01Z","Action":"fail","Package":"ex/pkg","Elapsed":0.1}
+`
+	rep := decode(t, stream)
+	if len(rep.UnattributedError) != 0 {
+		t.Errorf("a normal test failure should not be unattributed, got %+v", rep.UnattributedError)
+	}
+}

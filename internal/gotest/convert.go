@@ -50,9 +50,24 @@ type Converter struct {
 	pkgOrder []string
 	seenPkg  map[string]bool
 
+	// pkgs accumulates package-level state used to surface build/setup failures
+	// that aren't attributable to any single test (feature: unattributedErrors).
+	pkgs map[string]*pkgAcc
+	// buildOutput collects build-output events keyed by ImportPath (e.g.
+	// "pkg.test"), which is how a compile failure's diagnostics arrive.
+	buildOutput map[string]*strings.Builder
+
 	haveTime bool
 	minTime  time.Time
 	maxTime  time.Time
+}
+
+// pkgAcc accumulates package-level signal for one import path.
+type pkgAcc struct {
+	output    strings.Builder // package-level output (Test == "")
+	failed    bool
+	hadTest   bool   // any per-test event was seen for this package
+	buildFail string // ImportPath from a fail event's FailedBuild, if any
 }
 
 func key(pkg, test string) string { return pkg + "\x00" + test }
@@ -61,7 +76,18 @@ func (c *Converter) lazyInit() {
 	if c.tests == nil {
 		c.tests = map[string]*testAcc{}
 		c.seenPkg = map[string]bool{}
+		c.pkgs = map[string]*pkgAcc{}
+		c.buildOutput = map[string]*strings.Builder{}
 	}
+}
+
+func (c *Converter) pkg(name string) *pkgAcc {
+	pa := c.pkgs[name]
+	if pa == nil {
+		pa = &pkgAcc{}
+		c.pkgs[name] = pa
+	}
+	return pa
 }
 
 // Process consumes one event. Call once per event in stream order.
@@ -78,17 +104,48 @@ func (c *Converter) Process(ev TestEvent) error {
 		c.haveTime = true
 	}
 
+	// Build events are keyed by ImportPath (e.g. "pkg.test"), not Package, and
+	// carry compile-failure diagnostics. Collect their output so a fail event
+	// can attach it via FailedBuild.
+	if ev.Action == ActionBuildOutput || ev.Action == ActionBuildFail {
+		if ev.ImportPath != "" && ev.Output != "" {
+			b := c.buildOutput[ev.ImportPath]
+			if b == nil {
+				b = &strings.Builder{}
+				c.buildOutput[ev.ImportPath] = b
+			}
+			b.WriteString(ev.Output)
+		}
+		return nil
+	}
+
 	if ev.Package != "" && !c.seenPkg[ev.Package] {
 		c.seenPkg[ev.Package] = true
 		c.pkgOrder = append(c.pkgOrder, ev.Package)
 	}
 
 	// Package-level events (no Test) carry build/setup output and the package
-	// pass/fail/skip summary. We don't model packages as tests, so ignore them
-	// here — individual test events already capture per-test results.
+	// pass/fail/skip summary. Individual test events capture per-test results,
+	// but a package can fail with NO test events (build failure, init panic,
+	// TestMain setup failure) — track that here so it becomes an
+	// unattributedError rather than vanishing from the report.
 	if ev.Test == "" {
+		if ev.Package != "" {
+			pa := c.pkg(ev.Package)
+			if ev.Action == ActionOutput {
+				pa.output.WriteString(ev.Output)
+			}
+			if ev.Action == ActionFail {
+				pa.failed = true
+				if ev.FailedBuild != "" {
+					pa.buildFail = ev.FailedBuild
+				}
+			}
+		}
 		return nil
 	}
+
+	c.pkg(ev.Package).hadTest = true
 
 	k := key(ev.Package, ev.Test)
 	ta := c.tests[k]
@@ -256,9 +313,40 @@ func (c *Converter) Build() report.Report {
 		rep.Suites = append(rep.Suites, suite)
 	}
 
+	rep.UnattributedError = c.buildUnattributedErrors()
 	rep.StartTimestamp = c.startMillis()
 	rep.Duration = c.durationMillis()
 	return rep
+}
+
+// buildUnattributedErrors surfaces package-level failures that produced no test
+// results — build/compile failures, init/TestMain panics, setup failures — as
+// report-level errors so they don't vanish from the report.
+func (c *Converter) buildUnattributedErrors() []report.ReportError {
+	var errs []report.ReportError
+	for _, name := range c.pkgOrder {
+		pa := c.pkgs[name]
+		if pa == nil || !pa.failed || pa.hadTest {
+			continue // either fine, or its failure is already attributed to a test
+		}
+		msg := name + ": package failed without running tests"
+		var detail string
+		if pa.buildFail != "" {
+			msg = name + ": build failed"
+			if b := c.buildOutput[pa.buildFail]; b != nil {
+				detail = b.String()
+			}
+		}
+		if detail == "" {
+			detail = pa.output.String()
+		}
+		re := report.ReportError{Message: msg}
+		if d := strings.TrimSpace(detail); d != "" {
+			re.Stack = d
+		}
+		errs = append(errs, re)
+	}
+	return errs
 }
 
 func (c *Converter) buildSuite(n *node, typ report.SuiteType) report.Suite {
