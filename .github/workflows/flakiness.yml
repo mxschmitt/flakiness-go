@@ -1,0 +1,56 @@
+name: Flakiness
+
+# Dogfooding: flakiness-go reports its own test suite to Flakiness.io.
+# Uploads use GitHub OIDC keyless auth — no secrets required. The OIDC token's
+# audience is the flakinessProject ("max/flakiness-go"), which must be bound to
+# this GitHub repository in the Flakiness.io project settings.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write  # required for GitHub OIDC keyless upload
+
+concurrency:
+  group: flakiness-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  report:
+    name: Run tests & report to Flakiness.io
+    runs-on: ubuntu-latest
+    env:
+      FLAKINESS_PROJECT: max/flakiness-go
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history so commitId / git-root resolution is accurate.
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+          cache: true
+
+      - name: Build flakiness-go
+        run: go build -o flakiness-go ./cmd/flakiness-go
+
+      # Wrapper mode: flakiness-go runs `go test -json ./...`, builds the
+      # report, and uploads it to Flakiness.io via OIDC. The step's exit code
+      # mirrors `go test`, so a real test failure still fails the job.
+      - name: Test & upload report
+        run: ./flakiness-go --flakiness-title="CI ${{ github.ref_name }}" ./...
+
+      # Always keep the JSON report as a build artifact, even on failure, so it
+      # can be inspected locally with `flakiness show ./flakiness-report`.
+      - name: Upload report artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: flakiness-report
+          path: flakiness-report/
+          if-no-files-found: warn
