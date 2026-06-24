@@ -72,6 +72,10 @@ func TestCollect_SingleLocationContext(t *testing.T) {
 	if s.FilePath != "a_test.go" {
 		t.Errorf("filePath = %q", s.FilePath)
 	}
+	// ContentType is left unset so the viewer infers it from the path.
+	if s.ContentType != "" {
+		t.Errorf("contentType = %q, want empty (viewer infers from path)", s.ContentType)
+	}
 }
 
 func TestCollect_MergesOverlappingChunks(t *testing.T) {

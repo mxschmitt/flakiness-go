@@ -9,12 +9,20 @@
 // the collector simply produces no telemetry — a documented, harmless no-op.
 package telemetry
 
-import "github.com/mxschmitt/flakiness-go/report"
+import (
+	"math"
 
-// Precision is the minimum change in percentage points required to record a new
-// point; flatter movement collapses into the previous point. The Node SDK uses
-// 10 for both series in its reporters.
-const Precision = 10.0
+	"github.com/mxschmitt/flakiness-go/report"
+)
+
+// Per-series precision (minimum change in percentage points to record a new
+// point; flatter movement collapses into the previous point). These match the
+// Node SDK defaults: CPU coalesces within 7pp (cpuUtilization.ts), RAM within
+// 1pp (ramUtilization.ts).
+const (
+	cpuPrecision = 7.0
+	ramPrecision = 1.0
+)
 
 type point struct {
 	ts    int64 // unix ms
@@ -53,8 +61,8 @@ func (c *Collector) Sample(nowMS int64) {
 				max = u
 			}
 		}
-		add(&c.cpuAvg, point{nowMS, sum / float64(len(cur))}, Precision)
-		add(&c.cpuMax, point{nowMS, max}, Precision)
+		add(&c.cpuAvg, point{nowMS, clampPct(sum / float64(len(cur)))}, cpuPrecision)
+		add(&c.cpuMax, point{nowMS, clampPct(max)}, cpuPrecision)
 		c.lastCPU = cur
 	} else if ok {
 		c.lastCPU = cur
@@ -64,9 +72,22 @@ func (c *Collector) Sample(nowMS int64) {
 	if c.totalRAM > 0 {
 		if free, ok := availableMemory(); ok {
 			used := float64(c.totalRAM-free) / float64(c.totalRAM) * 100
-			add(&c.ram, point{nowMS, used}, Precision)
+			add(&c.ram, point{nowMS, clampPct(used)}, ramPrecision)
 		}
 	}
+}
+
+// clampPct constrains a utilization figure to the schema's required [0,100]
+// range; counter jitter in /proc deltas can otherwise yield a value marginally
+// outside it.
+func clampPct(v float64) float64 {
+	if v < 0 {
+		return 0
+	}
+	if v > 100 {
+		return 100
+	}
+	return v
 }
 
 // Enrich writes the collected telemetry onto the report. It is a no-op for any
@@ -132,6 +153,8 @@ func abs(f float64) float64 {
 	return f
 }
 
+// round2 rounds to 2 decimals using round-half-away-from-zero, matching the
+// SDK's Math.round(x*100)/100 for both signs.
 func round2(f float64) float64 {
-	return float64(int64(f*100+0.5)) / 100
+	return math.Round(f*100) / 100
 }

@@ -9,11 +9,11 @@ import (
 
 func TestAdd_CoalescesFlatRegion(t *testing.T) {
 	var s []point
-	// Three near-equal values (within Precision) collapse to one point whose
+	// Three near-equal values (within cpuPrecision) collapse to one point whose
 	// timestamp advances to the latest.
-	add(&s, point{1000, 50}, Precision)
-	add(&s, point{2000, 51}, Precision)
-	add(&s, point{3000, 52}, Precision)
+	add(&s, point{1000, 50}, cpuPrecision)
+	add(&s, point{2000, 51}, cpuPrecision)
+	add(&s, point{3000, 52}, cpuPrecision)
 	if len(s) != 2 {
 		t.Fatalf("flat region should coalesce to 2 points, got %d: %+v", len(s), s)
 	}
@@ -24,9 +24,9 @@ func TestAdd_CoalescesFlatRegion(t *testing.T) {
 
 func TestAdd_KeepsLargeSwings(t *testing.T) {
 	var s []point
-	add(&s, point{1000, 10}, Precision)
-	add(&s, point{2000, 90}, Precision) // jump >> precision
-	add(&s, point{3000, 12}, Precision) // jump back
+	add(&s, point{1000, 10}, cpuPrecision)
+	add(&s, point{2000, 90}, cpuPrecision) // jump >> precision
+	add(&s, point{3000, 12}, cpuPrecision) // jump back
 	if len(s) != 3 {
 		t.Fatalf("large swings must be kept, got %d points", len(s))
 	}
@@ -54,6 +54,38 @@ func TestEncode_DeltaTimestampsAndRounding(t *testing.T) {
 	}
 	if got[1][1] != 30.13 { // rounded to 2 decimals
 		t.Errorf("value rounding = %v, want 30.13", got[1][1])
+	}
+}
+
+func TestRound2(t *testing.T) {
+	cases := []struct {
+		in, want float64
+	}{
+		{30.126, 30.13},
+		{30.124, 30.12},
+		{30.125, 30.13}, // half away from zero
+		{0, 0},
+		{100, 100},
+		{-30.126, -30.13}, // negatives round away from zero like Math.round's magnitude
+	}
+	for _, c := range cases {
+		if got := round2(c.in); got != c.want {
+			t.Errorf("round2(%v) = %v, want %v", c.in, got, c.want)
+		}
+	}
+}
+
+func TestClampPct(t *testing.T) {
+	for _, c := range []struct{ in, want float64 }{
+		{-0.5, 0},
+		{0, 0},
+		{50, 50},
+		{100, 100},
+		{100.01, 100}, // counter jitter must not exceed the schema's max
+	} {
+		if got := clampPct(c.in); got != c.want {
+			t.Errorf("clampPct(%v) = %v, want %v", c.in, got, c.want)
+		}
 	}
 }
 

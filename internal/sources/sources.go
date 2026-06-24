@@ -75,10 +75,12 @@ func Collect(rep *report.Report, gitRoot string) {
 			if from >= to {
 				continue
 			}
+			// Leave ContentType unset, like the SDK's collectSources: the
+			// viewer infers the MIME type from the file path, which is correct
+			// for non-Go files a location might reference (testdata, templates).
 			s := report.Source{
-				FilePath:    file,
-				Text:        strings.Join(lines[from:to], "\n"),
-				ContentType: "text/x-go",
+				FilePath: file,
+				Text:     strings.Join(lines[from:to], "\n"),
 			}
 			if from != 0 {
 				s.LineOffset = from + 1
