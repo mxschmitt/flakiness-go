@@ -129,8 +129,23 @@ type Suite struct {
 	Tests    []Test    `json:"tests,omitempty"`
 }
 
+// Source is an embedded source-code excerpt that provides context for the
+// Location references throughout the report.
+type Source struct {
+	// FilePath is the git-root-relative POSIX path; matches Location.File.
+	FilePath string `json:"filePath"`
+	// Text is the (possibly partial) file content for this excerpt.
+	Text string `json:"text"`
+	// LineOffset is the 1-based line number of Text's first line. Omitted when
+	// the excerpt starts at line 1.
+	LineOffset int `json:"lineOffset,omitempty"`
+	// ContentType is an optional MIME hint for syntax highlighting.
+	ContentType string `json:"contentType,omitempty"`
+}
+
 // Report is the root document written to report.json.
 type Report struct {
+	Sources           []Source      `json:"sources,omitempty"`
 	FlakinessProject  string        `json:"flakinessProject,omitempty"`
 	Title             string        `json:"title,omitempty"`
 	Category          string        `json:"category"`

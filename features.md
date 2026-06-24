@@ -24,7 +24,7 @@ feature — they are not gaps in this reporter so much as in the runner's output
 | 15 | `parallelIndex` | N/A | `t.Parallel()` exists but the worker index is not exposed by `go test -json`. |
 | 16 | `FLAKINESS_TITLE` | ✅ | Honored via `--flakiness-title` / `FLAKINESS_TITLE`. |
 | 17 | `FLAKINESS_OUTPUT_DIR` | ✅ | Honored via `--flakiness-output-dir` / `FLAKINESS_OUTPUT_DIR`, defaults to `flakiness-report`. |
-| 18 | Sources | ❌ | Top-level `sources[]` is not populated (no steps to anchor; locations link to git source). |
+| 18 | Sources | ✅ | Top-level `sources[]` is populated with ±5-line excerpts around every referenced location (test definitions, errors, skip annotations), read from the git checkout. Overlapping ranges in a file are merged; `lineOffset` is set when an excerpt doesn't start at line 1. |
 | 19 | Error snippets | ❌ | `go test` emits plain failure text without ANSI-highlighted code excerpts. |
 | 20 | Errors support | ✅ | Failures are captured as a `ReportError` with a message synthesized from the test's output. Go surfaces a single aggregate failure per test, so one error per attempt. |
 | 21 | Unattributed errors | ✅ | A package that fails with no test results — compile/build failure (the `build-output`/`FailedBuild` diagnostics are captured), `init()`/`TestMain` panic, or setup failure — becomes a report-level `unattributedError` with the failure output, instead of vanishing. |

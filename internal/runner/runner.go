@@ -16,6 +16,7 @@ import (
 	"github.com/mxschmitt/flakiness-go/internal/gitinfo"
 	"github.com/mxschmitt/flakiness-go/internal/gotest"
 	"github.com/mxschmitt/flakiness-go/internal/oidc"
+	"github.com/mxschmitt/flakiness-go/internal/sources"
 	"github.com/mxschmitt/flakiness-go/internal/upload"
 	"github.com/mxschmitt/flakiness-go/report"
 )
@@ -65,6 +66,10 @@ func (r *Runner) Run() (int, error) {
 
 	rep := conv.Build()
 	r.fillMetadata(&rep)
+
+	// Embed source excerpts for every referenced location so the viewer can
+	// show context. Best-effort: a no-op without a git root.
+	sources.Collect(&rep, r.Cfg.GitRoot)
 
 	if r.Cfg.OutputDir != "" {
 		if err := report.WriteDir(&rep, r.Cfg.OutputDir); err != nil {

@@ -34,6 +34,7 @@ internal/runner/    orchestration: run/ingest -> convert -> write -> upload
 internal/gitinfo/   git commit & root lookups
 internal/ci/        CI run-URL detection
 internal/oidc/      GitHub Actions OIDC token fetch
+internal/sources/   embeds source excerpts for referenced locations
 internal/upload/    Flakiness.io upload protocol
 testdata/example/   fixture Go module used by tests
 ```
