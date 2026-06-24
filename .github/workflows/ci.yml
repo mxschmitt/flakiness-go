@@ -24,12 +24,11 @@ jobs:
         go: ["1.22", "1.23", "stable"]
         exclude:
           # Go 1.22's race runtime produces binaries the macos-latest (arm64)
-          # linker/dyld rejects ("missing LC_UUID load command"). Run 1.22 on
-          # the Intel macos-13 image, which has the older linker, instead.
+          # linker/dyld rejects ("missing LC_UUID load command"). macOS is still
+          # covered by Go 1.23 and stable; the Go 1.22 floor is covered on Linux
+          # and Windows. (We avoid the Intel macos-13 image: its hosted runners
+          # are deprecated and have very long queue times.)
           - os: macos-latest
-            go: "1.22"
-        include:
-          - os: macos-13
             go: "1.22"
     steps:
       - uses: actions/checkout@v4
