@@ -30,7 +30,7 @@ feature — they are not gaps in this reporter so much as in the runner's output
 | 21 | Unattributed errors | ✅ | A package that fails with no test results — compile/build failure (the `build-output`/`FailedBuild` diagnostics are captured), `init()`/`TestMain` panic, or setup failure — becomes a report-level `unattributedError` with the failure output, instead of vanishing. |
 | 22 | Source locations | ✅ | Top-level `TestXxx`/`Example`/`Benchmark`/`Fuzz` functions are located by parsing `*_test.go` with `go/ast`. Subtests are created at runtime and have no static location. |
 | 23 | Auto-upload | ✅ | GitHub OIDC (via `FLAKINESS_PROJECT`), `FLAKINESS_ACCESS_TOKEN`, and `FLAKINESS_DISABLE_UPLOAD` / `--flakiness-disable-upload` opt-out. |
-| 24 | CPU / RAM telemetry | ❌ | System telemetry is not collected. |
+| 24 | CPU / RAM telemetry | ✅ | In wrapper mode, a 1s background sampler records system CPU (`cpuAvg`/`cpuMax` across cores) and RAM utilization while `go test` runs, plus `cpuCount`/`ramBytes`. Series are flat-region-coalesced and delta-encoded like the SDK. Sampling reads `/proc` (Linux, where CI runs); on other platforms it's a documented no-op. Not collected in `--stdin` mode (tests ran elsewhere). |
 | 25 | Duplicate-name handling | ⚠️ | `go test` auto-disambiguates duplicate subtest names (a second `t.Run("x", …)` becomes `x#01`), so in-package collisions can't reach the converter. Cross-package names are disambiguated by the package (file) suite. Re-runs are intentionally merged as attempts (feature 6). |
 
 ## Status mapping

@@ -143,23 +143,34 @@ type Source struct {
 	ContentType string `json:"contentType,omitempty"`
 }
 
+// TelemetryPoint is one [timestampOrDelta, value] tuple in a telemetry series.
+// The first tuple in a series holds an absolute Unix-ms timestamp; subsequent
+// tuples hold the millisecond delta from the previous sample. Value is a
+// percentage 0–100.
+type TelemetryPoint [2]float64
+
 // Report is the root document written to report.json.
 type Report struct {
-	Sources           []Source      `json:"sources,omitempty"`
-	FlakinessProject  string        `json:"flakinessProject,omitempty"`
-	Title             string        `json:"title,omitempty"`
-	Category          string        `json:"category"`
-	CommitID          string        `json:"commitId"`
-	RelatedCommitIDs  []string      `json:"relatedCommitIds,omitempty"`
-	ConfigPath        string        `json:"configPath,omitempty"`
-	URL               string        `json:"url,omitempty"`
-	GeneratedBy       *NameVersion  `json:"generatedBy,omitempty"`
-	TestRunner        *NameVersion  `json:"testRunner,omitempty"`
-	Runtime           *NameVersion  `json:"runtime,omitempty"`
-	Environments      []Environment `json:"environments"`
-	Suites            []Suite       `json:"suites,omitempty"`
-	Tests             []Test        `json:"tests,omitempty"`
-	UnattributedError []ReportError `json:"unattributedErrors,omitempty"`
-	StartTimestamp    int64         `json:"startTimestamp"`
-	Duration          int64         `json:"duration"`
+	Sources           []Source         `json:"sources,omitempty"`
+	FlakinessProject  string           `json:"flakinessProject,omitempty"`
+	Title             string           `json:"title,omitempty"`
+	Category          string           `json:"category"`
+	CommitID          string           `json:"commitId"`
+	RelatedCommitIDs  []string         `json:"relatedCommitIds,omitempty"`
+	ConfigPath        string           `json:"configPath,omitempty"`
+	URL               string           `json:"url,omitempty"`
+	GeneratedBy       *NameVersion     `json:"generatedBy,omitempty"`
+	TestRunner        *NameVersion     `json:"testRunner,omitempty"`
+	Runtime           *NameVersion     `json:"runtime,omitempty"`
+	Environments      []Environment    `json:"environments"`
+	Suites            []Suite          `json:"suites,omitempty"`
+	Tests             []Test           `json:"tests,omitempty"`
+	UnattributedError []ReportError    `json:"unattributedErrors,omitempty"`
+	StartTimestamp    int64            `json:"startTimestamp"`
+	Duration          int64            `json:"duration"`
+	CPUCount          int              `json:"cpuCount,omitempty"`
+	CPUAvg            []TelemetryPoint `json:"cpuAvg,omitempty"`
+	CPUMax            []TelemetryPoint `json:"cpuMax,omitempty"`
+	RAM               []TelemetryPoint `json:"ram,omitempty"`
+	RAMBytes          int64            `json:"ramBytes,omitempty"`
 }

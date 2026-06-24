@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"runtime"
 	"strings"
+	"time"
 
 	"github.com/mxschmitt/flakiness-go/internal/ci"
 	"github.com/mxschmitt/flakiness-go/internal/config"
@@ -17,6 +18,7 @@ import (
 	"github.com/mxschmitt/flakiness-go/internal/gotest"
 	"github.com/mxschmitt/flakiness-go/internal/oidc"
 	"github.com/mxschmitt/flakiness-go/internal/sources"
+	"github.com/mxschmitt/flakiness-go/internal/telemetry"
 	"github.com/mxschmitt/flakiness-go/internal/upload"
 	"github.com/mxschmitt/flakiness-go/report"
 )
@@ -55,9 +57,15 @@ func (r *Runner) Run() (int, error) {
 
 	testExit := 0
 	var err error
+	var sampler *telemetry.Sampler
 	if r.Cfg.Stdin {
+		// In stdin mode the tests already ran elsewhere, so sampling this
+		// process's resource use would be meaningless.
 		err = gotest.DecodeStream(r.Stdin, conv.Process)
 	} else {
+		// Wrapper mode: sample system CPU/RAM while `go test` runs.
+		sampler = telemetry.NewSampler()
+		sampler.Start()
 		testExit, err = r.runGoTest(conv)
 	}
 	if err != nil {
@@ -66,6 +74,9 @@ func (r *Runner) Run() (int, error) {
 
 	rep := conv.Build()
 	r.fillMetadata(&rep)
+	if sampler != nil {
+		sampler.Stop(&rep, time.Now().UnixMilli())
+	}
 
 	// Embed source excerpts for every referenced location so the viewer can
 	// show context. Best-effort: a no-op without a git root.

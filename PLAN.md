@@ -217,7 +217,7 @@ Retries with backoff on 5xx for the POST/PUT calls, like the reference.
 
 ## 7. Out of scope (v1)
 
-Attachments production, test steps, CPU/RAM telemetry, `relatedCommitIds`. All
-are optional in the spec and have no natural Go `go test` source — documented in
-`features.md`. (`sources[]` embedding, originally out of scope, is now
-implemented in `internal/sources`.)
+Attachments production, test steps, `relatedCommitIds`. All are optional in the
+spec and have no natural Go `go test` source — documented in `features.md`.
+(`sources[]` embedding and CPU/RAM telemetry, originally out of scope, are now
+implemented in `internal/sources` and `internal/telemetry`.)
