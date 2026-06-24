@@ -5,8 +5,9 @@ Thanks for your interest in improving the Go reporter for [Flakiness.io](https:/
 ## Prerequisites
 
 - Go 1.22 or newer.
-- No third-party dependencies: this module is intentionally stdlib-only. Please
-  keep it that way unless there's a compelling reason to add one.
+- One third-party dependency (`github.com/andybalholm/brotli`, required for the
+  mandatory brotli report compression on upload); otherwise stdlib-only. Please
+  avoid adding further dependencies without a compelling reason.
 
 ## Development
 

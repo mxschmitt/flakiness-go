@@ -9,6 +9,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/andybalholm/brotli"
+
 	"github.com/mxschmitt/flakiness-go/report"
 )
 
@@ -41,7 +43,11 @@ func TestUpload_HappyPath(t *testing.T) {
 		if ct := r.Header.Get("Content-Type"); ct != "application/json" {
 			t.Errorf("report content-type = %q", ct)
 		}
-		body, _ := io.ReadAll(r.Body)
+		// The report must be brotli-compressed with Content-Encoding: br.
+		if enc := r.Header.Get("Content-Encoding"); enc != "br" {
+			t.Errorf("report content-encoding = %q, want br", enc)
+		}
+		body, _ := io.ReadAll(brotli.NewReader(r.Body))
 		json.Unmarshal(body, &gotReport)
 		reportPut = true
 		w.WriteHeader(http.StatusOK)

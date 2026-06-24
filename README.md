@@ -17,8 +17,9 @@ official [Playwright](https://github.com/flakiness/playwright),
 
 > Built to slot directly into the `flakiness/*` reporter family: it follows the
 > same configuration surface, the same upload protocol (incl. GitHub OIDC
-> keyless auth), and ships a [`features.md`](./features.md) keyed to the
-> official feature checklist. Stdlib-only, zero third-party dependencies.
+> keyless auth and mandatory brotli report compression), and ships a
+> [`features.md`](./features.md) keyed to the official feature checklist. Its
+> only dependency is a pure-Go brotli codec.
 
 ## Install
 

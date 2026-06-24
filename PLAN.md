@@ -146,11 +146,18 @@ flakiness-go/
 
 ### Dependencies
 
-**Standard library only.** pytest's uploader brotli-compresses the report and
-text attachments before the presigned PUT; Go's stdlib has no brotli encoder, so
-we upload **uncompressed** (omit `Content-Encoding`) — the spec explicitly says
-reporters must not compress attachments themselves and the server applies its
-own compression, so this is safe and keeps the module dependency-free.
+**One dependency: `github.com/andybalholm/brotli`** (pure Go). Everything else
+is standard library.
+
+The brotli dep is non-negotiable for upload. The Flakiness.io server mints a
+presigned R2 URL for `report.json.br` whose signature *includes* the
+`content-encoding` header, so the report body **must** be brotli-compressed and
+sent with `Content-Encoding: br` — an uncompressed PUT fails with
+`SignatureDoesNotMatch`. The official Node SDK and pytest reporters both do
+this; Go's stdlib has no brotli encoder, hence the dependency. (This was
+confirmed empirically: an early stdlib-only attempt that uploaded uncompressed
+got the signature error from R2.) Compressible text attachments are likewise
+brotli-compressed; binary attachments upload as-is.
 
 ## 4. Configuration (mirrors pytest precedence: CLI flag > env > default)
 

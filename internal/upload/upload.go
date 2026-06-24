@@ -1,8 +1,12 @@
 // Package upload implements the Flakiness.io report upload protocol:
-// start -> PUT report -> (attachments) -> finish. It mirrors uploader.py,
-// minus brotli compression (Go's stdlib has no brotli encoder; the server
-// applies its own compression, and the spec forbids reporters from compressing
-// attachments themselves).
+// start -> PUT report -> (attachments) -> finish. It mirrors the official
+// Node SDK and pytest uploaders.
+//
+// The report body is brotli-compressed and sent with Content-Encoding: br —
+// this is mandatory: the server mints a presigned URL for `report.json.br`
+// that signs the `content-encoding` header, so an uncompressed PUT fails with
+// SignatureDoesNotMatch. Compressible (text-like) attachments are likewise
+// brotli-compressed; binary attachments are uploaded as-is.
 package upload
 
 import (
@@ -12,10 +16,38 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"strings"
 	"time"
+
+	"github.com/andybalholm/brotli"
 
 	"github.com/mxschmitt/flakiness-go/report"
 )
+
+// compressBrotli brotli-compresses data at quality 6 (matching the Node SDK).
+func compressBrotli(data []byte) ([]byte, error) {
+	var buf bytes.Buffer
+	w := brotli.NewWriterLevel(&buf, 6)
+	if _, err := w.Write(data); err != nil {
+		return nil, err
+	}
+	if err := w.Close(); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+// isCompressible reports whether a content type should be brotli-compressed
+// before upload, mirroring the SDK's heuristic.
+func isCompressible(contentType string) bool {
+	ct := strings.ToLower(strings.TrimSpace(contentType))
+	return strings.HasPrefix(ct, "text/") ||
+		strings.HasSuffix(ct, "+json") ||
+		strings.HasSuffix(ct, "+text") ||
+		strings.HasSuffix(ct, "+xml") ||
+		ct == "application/json" ||
+		ct == "application/xml"
+}
 
 // Attachment is a local file to upload alongside the report.
 type Attachment struct {
@@ -57,12 +89,16 @@ func (c *Client) Upload(rep *report.Report, attachments []Attachment, token stri
 		return "", fmt.Errorf("upload start failed: %w", err)
 	}
 
-	// Step 2: PUT the report JSON.
+	// Step 2: PUT the report JSON, brotli-compressed (mandatory — see package doc).
 	body, err := json.Marshal(rep)
 	if err != nil {
 		return "", err
 	}
-	if err := c.putBytes(start.PresignedReportURL, body, "application/json", ""); err != nil {
+	compressed, err := compressBrotli(body)
+	if err != nil {
+		return "", fmt.Errorf("compressing report: %w", err)
+	}
+	if err := c.putBytes(start.PresignedReportURL, compressed, "application/json", "br"); err != nil {
 		return "", fmt.Errorf("report upload failed: %w", err)
 	}
 
@@ -144,7 +180,14 @@ func (c *Client) uploadAttachments(uploadToken string, attachments []Attachment)
 		if err != nil {
 			continue
 		}
-		if err := c.putBytes(dst, data, a.ContentType, ""); err != nil {
+		encoding := ""
+		if isCompressible(a.ContentType) {
+			if cdata, cerr := compressBrotli(data); cerr == nil {
+				data = cdata
+				encoding = "br"
+			}
+		}
+		if err := c.putBytes(dst, data, a.ContentType, encoding); err != nil {
 			return err
 		}
 	}
