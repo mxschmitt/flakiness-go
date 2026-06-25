@@ -198,10 +198,15 @@ func (c *Client) uploadAttachments(uploadToken string, attachments []Attachment)
 		}
 		encoding := ""
 		if isCompressible(a.ContentType) {
-			if cdata, cerr := compressBrotli(data); cerr == nil {
-				data = cdata
-				encoding = "br"
+			// Like the SDK (_uploadAttachment), a compressible attachment is
+			// always sent brotli-compressed; a compression failure aborts the
+			// upload rather than silently sending raw bytes.
+			cdata, cerr := compressBrotli(data)
+			if cerr != nil {
+				return fmt.Errorf("compressing attachment %s: %w", a.ID, cerr)
 			}
+			data = cdata
+			encoding = "br"
 		}
 		if err := c.putBytes(dst, data, a.ContentType, encoding); err != nil {
 			return err

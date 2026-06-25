@@ -1,10 +1,13 @@
 package upload
 
 import (
+	"bytes"
 	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"sync/atomic"
 	"testing"
 
@@ -168,5 +171,84 @@ func TestIsCompressible(t *testing.T) {
 		if isCompressible(ct) {
 			t.Errorf("isCompressible(%q) = true, want false (matches SDK)", ct)
 		}
+	}
+}
+
+func TestUpload_Attachments(t *testing.T) {
+	// Write a text (compressible) and a binary (raw) attachment to disk.
+	dir := t.TempDir()
+	textPath := filepath.Join(dir, "log.txt")
+	binPath := filepath.Join(dir, "shot.png")
+	if err := os.WriteFile(textPath, []byte("hello log content"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(binPath, []byte{0x89, 0x50, 0x4e, 0x47, 1, 2, 3}, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	type put struct {
+		encoding    string
+		contentType string
+		body        []byte
+	}
+	puts := map[string]put{}
+	var attIDs []string
+
+	mux := http.NewServeMux()
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	mux.HandleFunc("/api/upload/start", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(startResponse{UploadToken: "utok", PresignedReportURL: srv.URL + "/put/report", WebURL: "/run/1"})
+	})
+	mux.HandleFunc("/api/upload/attachments", func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			AttachmentIds []string `json:"attachmentIds"`
+		}
+		json.NewDecoder(r.Body).Decode(&body)
+		attIDs = body.AttachmentIds
+		var resp []attachmentURL
+		for _, id := range body.AttachmentIds {
+			resp = append(resp, attachmentURL{AttachmentID: id, PresignedURL: srv.URL + "/put/" + id})
+		}
+		json.NewEncoder(w).Encode(resp)
+	})
+	mux.HandleFunc("/put/", func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		puts[r.URL.Path] = put{encoding: r.Header.Get("Content-Encoding"), contentType: r.Header.Get("Content-Type"), body: raw}
+		w.WriteHeader(200)
+	})
+	mux.HandleFunc("/api/upload/finish", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(200) })
+
+	atts := []Attachment{
+		{ID: "txt1", ContentType: "text/plain", Path: textPath},
+		{ID: "bin1", ContentType: "image/png", Path: binPath},
+	}
+	client := New(srv.URL)
+	if _, err := client.Upload(&report.Report{Category: "go", CommitID: "abc"}, atts, "tok"); err != nil {
+		t.Fatalf("Upload: %v", err)
+	}
+
+	if len(attIDs) != 2 {
+		t.Errorf("attachment ids sent = %v, want 2", attIDs)
+	}
+	// Text attachment: brotli-compressed with Content-Encoding: br, decodes back.
+	txt := puts["/put/txt1"]
+	if txt.encoding != "br" {
+		t.Errorf("text attachment encoding = %q, want br", txt.encoding)
+	}
+	if txt.contentType != "text/plain" {
+		t.Errorf("text attachment content-type = %q", txt.contentType)
+	}
+	dec, _ := io.ReadAll(brotli.NewReader(bytes.NewReader(txt.body)))
+	if string(dec) != "hello log content" {
+		t.Errorf("decompressed text = %q, want original", dec)
+	}
+	// Binary attachment: raw, no Content-Encoding.
+	bin := puts["/put/bin1"]
+	if bin.encoding != "" {
+		t.Errorf("binary attachment must not be compressed, got encoding %q", bin.encoding)
+	}
+	if len(bin.body) != 7 {
+		t.Errorf("binary attachment body len = %d, want 7 (raw)", len(bin.body))
 	}
 }
