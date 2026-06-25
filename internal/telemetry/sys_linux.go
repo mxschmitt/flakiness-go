@@ -45,20 +45,24 @@ func readCPU() ([]cpuTimes, bool) {
 			break // cpu lines are first; stop at the first non-cpu line
 		}
 		fields := strings.Fields(line)
-		if fields[0] == "cpu" || len(fields) < 5 {
+		if fields[0] == "cpu" || len(fields) < 8 {
 			continue // skip the aggregate line and malformed entries
 		}
-		var total, idle uint64
-		for i, f := range fields[1:] {
+		// Match Node's os.cpus(), which the SDK reads: it exposes only
+		// user, nice, sys, idle, irq — so total = user+nice+sys+irq+idle and
+		// busy = total - idle. iowait/softirq/steal/guest are intentionally
+		// excluded so our utilization numbers match the Node SDK on the same
+		// host. /proc/stat order: user nice system idle iowait irq softirq ...
+		nums := make([]uint64, 0, 8)
+		for _, f := range fields[1:8] {
 			v, err := strconv.ParseUint(f, 10, 64)
 			if err != nil {
-				continue
+				v = 0
 			}
-			total += v
-			if i == 3 || i == 4 { // idle, iowait
-				idle += v
-			}
+			nums = append(nums, v)
 		}
+		user, nice, system, idle, irq := nums[0], nums[1], nums[2], nums[3], nums[5]
+		total := user + nice + system + irq + idle
 		out = append(out, cpuTimes{total: total, busy: total - idle})
 	}
 	if len(out) == 0 {
@@ -67,9 +71,12 @@ func readCPU() ([]cpuTimes, bool) {
 	return out, true
 }
 
-// availableMemory returns MemAvailable from /proc/meminfo in bytes.
+// availableMemory returns free memory in bytes. It uses MemFree to match
+// Node's os.freemem() (which the SDK's RAMUtilization uses on Linux), so our
+// RAM-utilization series matches the Node SDK on the same host. (MemAvailable
+// would be more "htop-like" but diverges from the SDK.)
 func availableMemory() (int64, bool) {
-	if v, ok := meminfoKB("MemAvailable:"); ok {
+	if v, ok := meminfoKB("MemFree:"); ok {
 		return v * 1024, true
 	}
 	return 0, false
