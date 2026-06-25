@@ -114,12 +114,38 @@ func TestUpload_RetriesOn503(t *testing.T) {
 
 func TestUpload_StartFailsHard(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusUnauthorized) // 401 is not retryable
+		w.WriteHeader(http.StatusUnauthorized)
 	}))
 	defer srv.Close()
 	client := New(srv.URL)
 	if _, err := client.Upload(&report.Report{}, nil, "tok"); err == nil {
-		t.Fatal("expected error on 401 start")
+		t.Fatal("expected error on persistent 401 start")
+	}
+}
+
+func TestUpload_RetriesOn4xx(t *testing.T) {
+	// The Node SDK's fetchOk throws on ANY non-2xx and retryWithBackoff retries
+	// all errors, so a transient 4xx is retried (not just 5xx).
+	var calls int32
+	mux := http.NewServeMux()
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	mux.HandleFunc("/api/upload/start", func(w http.ResponseWriter, r *http.Request) {
+		if atomic.AddInt32(&calls, 1) < 2 {
+			w.WriteHeader(http.StatusTooManyRequests) // 429, a 4xx
+			return
+		}
+		json.NewEncoder(w).Encode(startResponse{UploadToken: "utok", PresignedReportURL: srv.URL + "/put", WebURL: "/run/1"})
+	})
+	mux.HandleFunc("/put", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(200) })
+	mux.HandleFunc("/api/upload/finish", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(200) })
+
+	client := New(srv.URL)
+	if _, err := client.Upload(&report.Report{}, nil, "tok"); err != nil {
+		t.Fatalf("Upload should retry the 429 and succeed: %v", err)
+	}
+	if got := atomic.LoadInt32(&calls); got != 2 {
+		t.Errorf("start called %d times, want 2 (1 retried 429 + success)", got)
 	}
 }
 

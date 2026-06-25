@@ -221,10 +221,12 @@ var httpBackoff = []time.Duration{
 	1000 * time.Millisecond,
 }
 
-// doWithRetry retries on transient failures (network errors and retryable 5xx
-// statuses) using httpBackoff, matching the reference uploader's retry policy.
-// Non-retryable statuses (e.g. 4xx) are returned immediately for the caller to
-// surface.
+// doWithRetry retries on any failure — network errors or any non-2xx status —
+// using httpBackoff, then a final attempt. This mirrors the Node SDK exactly:
+// fetchOk throws on every !response.ok and retryWithBackoff catches all errors,
+// so the SDK retries 4xx as well as 5xx (HTTP_BACKOFF = len(httpBackoff)
+// retries + 1 final call). On exhaustion the last response is returned so the
+// caller surfaces the real status.
 func (c *Client) doWithRetry(req *http.Request) (*http.Response, error) {
 	var body []byte
 	if req.Body != nil {
@@ -237,6 +239,7 @@ func (c *Client) doWithRetry(req *http.Request) (*http.Response, error) {
 	}
 	attempts := len(httpBackoff) + 1
 	var lastErr error
+	var lastResp *http.Response
 	for attempt := 0; attempt < attempts; attempt++ {
 		if body != nil {
 			req.Body = io.NopCloser(bytes.NewReader(body))
@@ -244,16 +247,23 @@ func (c *Client) doWithRetry(req *http.Request) (*http.Response, error) {
 		}
 		resp, err := c.HTTPClient.Do(req)
 		if err != nil {
-			lastErr = err
-		} else if resp.StatusCode == 500 || resp.StatusCode == 502 || resp.StatusCode == 503 || resp.StatusCode == 504 {
-			resp.Body.Close()
-			lastErr = fmt.Errorf("server returned %d", resp.StatusCode)
+			lastErr, lastResp = err, nil
+		} else if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			// Retry every non-2xx, like the SDK's fetchOk. Keep the final
+			// response so the caller can report its status/body.
+			if lastResp != nil {
+				lastResp.Body.Close()
+			}
+			lastErr, lastResp = nil, resp
 		} else {
 			return resp, nil
 		}
 		if attempt < len(httpBackoff) {
 			time.Sleep(httpBackoff[attempt])
 		}
+	}
+	if lastResp != nil {
+		return lastResp, nil // non-2xx; expectOK will turn it into an error
 	}
 	return nil, lastErr
 }
