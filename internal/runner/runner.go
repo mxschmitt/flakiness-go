@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"regexp"
 	"runtime"
 	"strings"
 	"time"
@@ -244,7 +245,7 @@ func osArch() string {
 // osVersion returns the OS version string, matching how the Node SDK populates
 // systemData.osVersion (createEnvironment.ts): macOS via `sw_vers
 // -productVersion`, Linux via VERSION_ID in /etc/os-release, Windows via the
-// `ver` command. Returns "" when it can't be determined (the field is then
+// kernel version. Returns "" when it can't be determined (the field is then
 // omitted). Without it, Flakiness.io shows the environment OS as "unknown".
 func osVersion() string {
 	switch runtime.GOOS {
@@ -257,11 +258,29 @@ func osVersion() string {
 			return v
 		}
 	case "windows":
+		// The Node SDK uses os.release(), which yields a bare kernel version
+		// like "10.0.26100". `cmd /c ver` prints the decorated banner
+		// "Microsoft Windows [Version 10.0.26100.32995]"; extract just the
+		// version number so we match the SDK's clean value rather than the
+		// banner.
 		if out, err := exec.Command("cmd", "/c", "ver").Output(); err == nil {
-			return strings.TrimSpace(string(out))
+			return parseWindowsVer(strings.TrimSpace(string(out)))
 		}
 	}
 	return ""
+}
+
+// windowsVerRe extracts a dotted version (e.g. 10.0.26100.32995) from the
+// `cmd /c ver` banner.
+var windowsVerRe = regexp.MustCompile(`\d+(?:\.\d+)+`)
+
+// parseWindowsVer pulls the bare version number out of the `ver` banner,
+// falling back to the trimmed banner if no version is found.
+func parseWindowsVer(banner string) string {
+	if m := windowsVerRe.FindString(banner); m != "" {
+		return m
+	}
+	return banner
 }
 
 // linuxOSReleaseVersionID reads VERSION_ID (e.g. "24.04") from /etc/os-release.

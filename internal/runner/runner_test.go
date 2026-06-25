@@ -402,3 +402,17 @@ func TestParseOSRelease(t *testing.T) {
 		}
 	}
 }
+
+func TestParseWindowsVer(t *testing.T) {
+	cases := []struct{ banner, want string }{
+		{"Microsoft Windows [Version 10.0.26100.32995]", "10.0.26100.32995"},
+		{"Microsoft Windows [Version 6.1.7601]", "6.1.7601"},
+		{"", ""},
+		{"no version here", "no version here"}, // fallback to banner
+	}
+	for _, c := range cases {
+		if got := parseWindowsVer(c.banner); got != c.want {
+			t.Errorf("parseWindowsVer(%q) = %q, want %q", c.banner, got, c.want)
+		}
+	}
+}
