@@ -84,8 +84,11 @@ func New(endpoint string) *Client {
 
 // Upload runs the full protocol and returns the web URL of the uploaded run.
 func (c *Client) Upload(rep *report.Report, attachments []Attachment, token string) (string, error) {
-	// Step 1: start.
-	start, err := c.start(token)
+	// Step 1: start. Pass orgSlug/projectSlug derived from flakinessProject,
+	// matching the SDK (uploadReport.ts): required for Device-OAuth
+	// user-session tokens (the Flakiness CLI), ignored for OIDC /
+	// FLAKINESS_ACCESS_TOKEN. Sent unconditionally for parity.
+	start, err := c.start(token, rep.FlakinessProject)
 	if err != nil {
 		return "", fmt.Errorf("upload start failed: %w", err)
 	}
@@ -115,9 +118,21 @@ func (c *Client) Upload(rep *report.Report, attachments []Attachment, token stri
 	return c.Endpoint + start.WebURL, nil
 }
 
-func (c *Client) start(token string) (*startResponse, error) {
-	req, _ := http.NewRequest(http.MethodPost, c.Endpoint+"/api/upload/start", nil)
+func (c *Client) start(token, flakinessProject string) (*startResponse, error) {
+	// Split "org/project" into orgSlug/projectSlug (empty when unset), matching
+	// the SDK's `flakinessProject.split('/')`.
+	var orgSlug, projectSlug string
+	if flakinessProject != "" {
+		if i := strings.IndexByte(flakinessProject, '/'); i >= 0 {
+			orgSlug, projectSlug = flakinessProject[:i], flakinessProject[i+1:]
+		} else {
+			orgSlug = flakinessProject
+		}
+	}
+	reqBody, _ := json.Marshal(map[string]string{"orgSlug": orgSlug, "projectSlug": projectSlug})
+	req, _ := http.NewRequest(http.MethodPost, c.Endpoint+"/api/upload/start", bytes.NewReader(reqBody))
 	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
 	resp, err := c.doWithRetry(req)
 	if err != nil {
 		return nil, err

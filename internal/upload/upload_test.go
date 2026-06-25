@@ -29,8 +29,10 @@ func TestUpload_HappyPath(t *testing.T) {
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 
+	var startBody map[string]string
 	mux.HandleFunc("/api/upload/start", func(w http.ResponseWriter, r *http.Request) {
 		startAuth = r.Header.Get("Authorization")
+		json.NewDecoder(r.Body).Decode(&startBody)
 		json.NewEncoder(w).Encode(startResponse{
 			UploadToken:        "utok",
 			PresignedReportURL: srv.URL + "/put-report",
@@ -59,11 +61,15 @@ func TestUpload_HappyPath(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	})
 
-	rep := &report.Report{Category: "go", CommitID: "abc"}
+	rep := &report.Report{Category: "go", CommitID: "abc", FlakinessProject: "max/flakiness-go"}
 	client := New(srv.URL)
 	url, err := client.Upload(rep, nil, "secret-token")
 	if err != nil {
 		t.Fatalf("Upload: %v", err)
+	}
+	// /start must carry orgSlug/projectSlug split from flakinessProject (SDK parity).
+	if startBody["orgSlug"] != "max" || startBody["projectSlug"] != "flakiness-go" {
+		t.Errorf("start body = %+v, want orgSlug=max projectSlug=flakiness-go", startBody)
 	}
 	if url != srv.URL+"/org/proj/run/1" {
 		t.Errorf("returned url = %q", url)
