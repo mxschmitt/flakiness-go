@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -23,6 +24,22 @@ import (
 
 	"github.com/mxschmitt/flakiness-go/report"
 )
+
+// resolveWebURL resolves the server-returned webUrl against the endpoint,
+// matching the SDK's `new URL(webUrl, endpoint)`: a relative webUrl is joined
+// onto the endpoint (no double slashes), an absolute one is returned as-is.
+// Falls back to plain concatenation if either fails to parse.
+func resolveWebURL(endpoint, webURL string) string {
+	base, err := url.Parse(endpoint)
+	if err != nil {
+		return endpoint + webURL
+	}
+	ref, err := url.Parse(webURL)
+	if err != nil {
+		return endpoint + webURL
+	}
+	return base.ResolveReference(ref).String()
+}
 
 // compressBrotli brotli-compresses data at quality 6 (matching the Node SDK).
 func compressBrotli(data []byte) ([]byte, error) {
@@ -115,7 +132,7 @@ func (c *Client) Upload(rep *report.Report, attachments []Attachment, token stri
 	if err := c.finish(start.UploadToken); err != nil {
 		return "", fmt.Errorf("upload finish failed: %w", err)
 	}
-	return c.Endpoint + start.WebURL, nil
+	return resolveWebURL(c.Endpoint, start.WebURL), nil
 }
 
 func (c *Client) start(token, flakinessProject string) (*startResponse, error) {

@@ -252,3 +252,16 @@ func TestUpload_Attachments(t *testing.T) {
 		t.Errorf("binary attachment body len = %d, want 7 (raw)", len(bin.body))
 	}
 }
+
+func TestResolveWebURL(t *testing.T) {
+	cases := []struct{ endpoint, webURL, want string }{
+		{"https://flakiness.io", "/org/p/run/1", "https://flakiness.io/org/p/run/1"},
+		{"https://flakiness.io/", "/org/p/run/1", "https://flakiness.io/org/p/run/1"},            // no double slash
+		{"https://flakiness.io", "https://cdn.flakiness.io/r/1", "https://cdn.flakiness.io/r/1"}, // absolute passes through
+	}
+	for _, c := range cases {
+		if got := resolveWebURL(c.endpoint, c.webURL); got != c.want {
+			t.Errorf("resolveWebURL(%q,%q) = %q, want %q", c.endpoint, c.webURL, got, c.want)
+		}
+	}
+}
