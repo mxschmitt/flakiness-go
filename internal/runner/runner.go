@@ -162,7 +162,7 @@ func (r *Runner) buildEnvironment() report.Environment {
 		SystemData: &report.SystemData{
 			OSName:    osName(),
 			OSVersion: osVersion(),
-			OSArch:    runtime.GOARCH,
+			OSArch:    osArch(),
 		},
 		Metadata: map[string]any{
 			"go_version": strings.TrimPrefix(runtime.Version(), "go"),
@@ -203,17 +203,41 @@ func (r *Runner) normalizedCommit() string {
 	return c
 }
 
-// osName maps Go's GOOS to the Flakiness.io osName convention used by the other
-// reporters (so FQL filters like `osName == "macos"` match across languages).
+// osName matches the Flakiness.io osName convention used by the other reporters
+// (createEnvironment.ts): macOS → "macos", Windows → "win", Linux → the distro
+// NAME from /etc/os-release (lowercased, e.g. "ubuntu"), falling back to the
+// GOOS. Matching these keeps FQL filters and environment dedup consistent
+// across reporters.
 func osName() string {
 	switch runtime.GOOS {
 	case "darwin":
 		return "macos"
 	case "windows":
 		return "win"
+	case "linux":
+		if n := linuxOSReleaseName(); n != "" {
+			return n
+		}
+		return "linux"
 	default:
 		return runtime.GOOS
 	}
+}
+
+// osArch matches the SDK's osArch, which on Unix is `uname -m` (e.g. "x86_64",
+// "aarch64"/"arm64") rather than Go's GOARCH ("amd64"/"arm64"). On platforms
+// without uname (Windows) it falls back to GOARCH, like the SDK uses
+// process.arch there.
+func osArch() string {
+	if runtime.GOOS == "windows" {
+		return runtime.GOARCH
+	}
+	if out, err := exec.Command("uname", "-m").Output(); err == nil {
+		if v := strings.TrimSpace(string(out)); v != "" {
+			return v
+		}
+	}
+	return runtime.GOARCH
 }
 
 // osVersion returns the OS version string, matching how the Node SDK populates
@@ -245,14 +269,26 @@ func linuxOSReleaseVersionID() string {
 	if err != nil {
 		return ""
 	}
-	return parseOSReleaseVersionID(string(data))
+	return parseOSRelease(string(data), "version_id")
 }
 
-// parseOSReleaseVersionID extracts VERSION_ID from /etc/os-release content,
-// stripping surrounding quotes (e.g. `VERSION_ID="24.04"` -> `24.04`).
-func parseOSReleaseVersionID(content string) string {
+// linuxOSReleaseName reads NAME (e.g. "ubuntu") from /etc/os-release.
+func linuxOSReleaseName() string {
+	data, err := os.ReadFile("/etc/os-release")
+	if err != nil {
+		return ""
+	}
+	return parseOSRelease(string(data), "name")
+}
+
+// parseOSRelease extracts a key from /etc/os-release content. The SDK
+// (readLinuxOSRelease) lowercases the whole file before parsing, so both the
+// key and value come back lowercased; surrounding quotes are stripped
+// (e.g. `NAME="Ubuntu"` with key "name" -> "ubuntu").
+func parseOSRelease(content, key string) string {
+	content = strings.ToLower(content)
 	for _, line := range strings.Split(content, "\n") {
-		if v, ok := strings.CutPrefix(strings.TrimSpace(line), "VERSION_ID="); ok {
+		if v, ok := strings.CutPrefix(strings.TrimSpace(line), key+"="); ok {
 			return strings.Trim(strings.TrimSpace(v), `"`)
 		}
 	}

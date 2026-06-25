@@ -361,17 +361,19 @@ func TestRunner_SkipsUploadOnInvalidCommit(t *testing.T) {
 	}
 }
 
-func TestParseOSReleaseVersionID(t *testing.T) {
-	cases := []struct{ content, want string }{
-		{"NAME=\"Ubuntu\"\nVERSION_ID=\"24.04\"\n", "24.04"}, // quoted (Ubuntu/Debian)
-		{"NAME=Fedora\nVERSION_ID=40\n", "40"},               // unquoted (Fedora)
-		{"VERSION_ID=\"13\"", "13"},                          // no trailing newline
-		{"ID=alpine\nPRETTY_NAME=\"Alpine\"\n", ""},          // no VERSION_ID
-		{"  VERSION_ID = nope\n", ""},                        // spaces around = -> no match
+func TestParseOSRelease(t *testing.T) {
+	cases := []struct{ content, key, want string }{
+		{"NAME=\"Ubuntu\"\nVERSION_ID=\"24.04\"\n", "version_id", "24.04"}, // quoted
+		{"NAME=Fedora\nVERSION_ID=40\n", "version_id", "40"},               // unquoted
+		{"VERSION_ID=\"13\"", "version_id", "13"},                          // no trailing newline
+		{"ID=alpine\nPRETTY_NAME=\"Alpine\"\n", "version_id", ""},          // missing key
+		{"  VERSION_ID = nope\n", "version_id", ""},                        // spaces around = -> no match
+		{"NAME=\"Ubuntu\"\nVERSION_ID=\"24.04\"\n", "name", "ubuntu"},      // NAME lowercased
+		{"NAME=Fedora Linux\n", "name", "fedora linux"},                    // value lowercased
 	}
 	for _, c := range cases {
-		if got := parseOSReleaseVersionID(c.content); got != c.want {
-			t.Errorf("parseOSReleaseVersionID(%q) = %q, want %q", c.content, got, c.want)
+		if got := parseOSRelease(c.content, c.key); got != c.want {
+			t.Errorf("parseOSRelease(%q, %q) = %q, want %q", c.content, c.key, got, c.want)
 		}
 	}
 }
