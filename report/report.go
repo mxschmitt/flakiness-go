@@ -10,6 +10,8 @@
 // milliseconds. Durations are milliseconds.
 package report
 
+import "encoding/json"
+
 // Category constants mirror the CATEGORY_* values in the spec.
 const (
 	CategoryPlaywright = "playwright"
@@ -110,6 +112,46 @@ type RunAttempt struct {
 	Stdout         []STDIOEntry  `json:"stdout,omitempty"`
 	Stderr         []STDIOEntry  `json:"stderr,omitempty"`
 	Attachments    []Attachment  `json:"attachments,omitempty"`
+}
+
+// MarshalJSON drops fields equal to their spec defaults, matching the Node SDK's
+// normalizeReport (cleanupAttempt): status/expectedStatus when "passed",
+// environmentIdx when 0, and duration when 0. This keeps emitted reports
+// byte-compatible with what the canonical reporters upload (smaller payload;
+// the server applies the same defaults).
+func (a RunAttempt) MarshalJSON() ([]byte, error) {
+	out := struct {
+		EnvironmentIdx int           `json:"environmentIdx,omitempty"`
+		ExpectedStatus TestStatus    `json:"expectedStatus,omitempty"`
+		Status         TestStatus    `json:"status,omitempty"`
+		StartTimestamp int64         `json:"startTimestamp"`
+		Duration       int64         `json:"duration,omitempty"`
+		Timeout        int64         `json:"timeout,omitempty"`
+		Annotations    []Annotation  `json:"annotations,omitempty"`
+		Errors         []ReportError `json:"errors,omitempty"`
+		ParallelIndex  *int          `json:"parallelIndex,omitempty"`
+		Stdout         []STDIOEntry  `json:"stdout,omitempty"`
+		Stderr         []STDIOEntry  `json:"stderr,omitempty"`
+		Attachments    []Attachment  `json:"attachments,omitempty"`
+	}{
+		EnvironmentIdx: a.EnvironmentIdx, // omitempty drops 0
+		StartTimestamp: a.StartTimestamp,
+		Duration:       a.Duration, // omitempty drops 0
+		Timeout:        a.Timeout,
+		Annotations:    a.Annotations,
+		Errors:         a.Errors,
+		ParallelIndex:  a.ParallelIndex,
+		Stdout:         a.Stdout,
+		Stderr:         a.Stderr,
+		Attachments:    a.Attachments,
+	}
+	if a.ExpectedStatus != StatusPassed {
+		out.ExpectedStatus = a.ExpectedStatus
+	}
+	if a.Status != StatusPassed {
+		out.Status = a.Status
+	}
+	return json.Marshal(out)
 }
 
 // Test is a single test case: a named location that can be run one or more times.

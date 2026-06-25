@@ -111,12 +111,20 @@ func TestRunner_EndToEnd(t *testing.T) {
 			break
 		}
 	}
+	// Reports strip default values (matching the Node SDK), so an omitted
+	// status round-trips to "" and MEANS passed. Normalize that when counting.
+	effStatus := func(s report.TestStatus) report.TestStatus {
+		if s == "" {
+			return report.StatusPassed
+		}
+		return s
+	}
 	statuses := map[report.TestStatus]int{}
 	var walk func(report.Suite)
 	walk = func(s report.Suite) {
 		for _, tc := range s.Tests {
 			for _, a := range tc.Attempts {
-				statuses[a.Status]++
+				statuses[effStatus(a.Status)]++
 			}
 		}
 		for _, sub := range s.Suites {
@@ -155,7 +163,7 @@ func TestRunner_EndToEnd(t *testing.T) {
 	}
 	if bench == nil {
 		t.Error("BenchmarkAdd missing from report")
-	} else if bench.Attempts[0].Status != report.StatusPassed {
+	} else if effStatus(bench.Attempts[0].Status) != report.StatusPassed {
 		t.Errorf("BenchmarkAdd status = %q, want passed", bench.Attempts[0].Status)
 	}
 
