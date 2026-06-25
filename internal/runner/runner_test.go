@@ -100,15 +100,14 @@ func TestRunner_EndToEnd(t *testing.T) {
 		t.Errorf("osName = %q, want normalized macos/win/linux", env.SystemData.OSName)
 	}
 
-	// Find the package suite and assert the mix of statuses.
+	// Tests are grouped into per-file "file" suites; aggregate across all of
+	// them. At least one must carry a source-file location.
 	if len(rep.Suites) == 0 {
 		t.Fatal("no suites in report")
 	}
-	var pkg report.Suite
 	for _, s := range rep.Suites {
-		if len(s.Tests) > 0 || len(s.Suites) > 0 {
-			pkg = s
-			break
+		if s.Type != report.SuiteFile {
+			t.Errorf("top-level suite %q type = %q, want file", s.Title, s.Type)
 		}
 	}
 	// Reports strip default values (matching the Node SDK), so an omitted
@@ -131,7 +130,9 @@ func TestRunner_EndToEnd(t *testing.T) {
 			walk(sub)
 		}
 	}
-	walk(pkg)
+	for _, s := range rep.Suites {
+		walk(s)
+	}
 
 	if statuses[report.StatusPassed] < 1 {
 		t.Errorf("expected at least one passed test, got %+v", statuses)
@@ -167,23 +168,29 @@ func TestRunner_EndToEnd(t *testing.T) {
 		t.Errorf("BenchmarkAdd status = %q, want passed", bench.Attempts[0].Status)
 	}
 
-	// Source location should be resolved for a top-level test.
-	var located bool
-	var findLoc func(report.Suite)
-	findLoc = func(s report.Suite) {
-		for _, tc := range s.Tests {
-			if tc.Location != nil && tc.Location.File == "sample_test.go" {
-				located = true
+	// Tests should be grouped under a per-file suite titled by the source file,
+	// and that file suite should carry a file location (this is the fix for the
+	// "tests belong to the import-path suite" issue).
+	var sawFileSuite bool
+	for _, s := range rep.Suites {
+		if s.Title == "sample_test.go" {
+			sawFileSuite = true
+			if s.Location == nil || s.Location.File != "sample_test.go" {
+				t.Errorf("sample_test.go file suite must have a file location, got %+v", s.Location)
 			}
 		}
-		for _, sub := range s.Suites {
-			findLoc(sub)
-		}
 	}
-	findLoc(pkg)
-	if !located {
-		t.Error("expected at least one test with a resolved source location")
+	if !sawFileSuite {
+		t.Errorf("expected a file suite titled sample_test.go, got suites %v", suiteTitles(rep.Suites))
 	}
+}
+
+func suiteTitles(suites []report.Suite) []string {
+	var out []string
+	for _, s := range suites {
+		out = append(out, s.Title)
+	}
+	return out
 }
 
 // fakeFlakinessServer implements the 4-step upload protocol and records the

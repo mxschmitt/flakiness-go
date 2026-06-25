@@ -235,7 +235,8 @@ func extractSkipReason(output string) string {
 type node struct {
 	title    string
 	pkg      string
-	isPkg    bool
+	isFile   bool   // a top-level "file" suite (title/file = git-relative path)
+	file     string // git-relative source file path, when isFile
 	children map[string]*node
 	order    []string // child titles in insertion order
 	test     *testAcc // set on leaf nodes that map to a test
@@ -279,19 +280,41 @@ func (c *Converter) Build() report.Report {
 		}
 	}
 
-	// Build a package -> suite tree. Leaf (non-parent) tests become Tests,
-	// nested under suite segments derived from their "/"-separated name. A
-	// parent test (one whose name prefixes a deeper test) becomes a suite; if
-	// it also has its own attempts, they're preserved on node.own.
+	// Build the suite tree. Top-level suites are "file" suites — one per source
+	// file (titled by its git-relative path), matching the spec's definition of
+	// `type: "file"` ("Suite representing a test file"). This groups a package's
+	// tests by their actual file (e.g. tests/page_test.go) instead of dumping
+	// them all under one import-path bucket. Tests whose top-level function
+	// can't be located fall back to a package-titled "file" suite so nothing is
+	// lost when source resolution is unavailable.
+	//
+	// Within a file suite, subtests (TestX/a/b) nest as "suite" nodes per "/"
+	// segment; a parent test that also ran in its own right keeps its data on
+	// node.own.
 	root := newNode("")
 	for _, k := range c.order {
 		ta := c.tests[k]
-		pkgNode := root.child(ta.pkg)
-		pkgNode.isPkg = true
-		pkgNode.pkg = ta.pkg
-
 		segments := strings.Split(ta.name, "/")
-		cur := pkgNode
+		topFunc := segments[0]
+
+		// Group key: the source file of the top-level test function, when
+		// resolvable; otherwise the import path.
+		fileKey, filePath := c.fileFor(ta.pkg, topFunc)
+
+		var top *node
+		if filePath != "" {
+			top = root.child(fileKey)
+			top.isFile = true
+			top.file = filePath
+			top.title = filePath // suite title is the source-file path
+		} else {
+			top = root.child(ta.pkg)
+			top.isFile = true // a package fallback is still a file-type suite
+			top.title = ta.pkg
+		}
+		top.pkg = ta.pkg
+
+		cur := top
 		for _, seg := range segments[:len(segments)-1] {
 			cur = cur.child(seg)
 			cur.pkg = ta.pkg
@@ -307,9 +330,9 @@ func (c *Converter) Build() report.Report {
 	}
 
 	var rep report.Report
-	for _, pkgTitle := range root.order {
-		pkgNode := root.children[pkgTitle]
-		suite := c.buildSuite(pkgNode, report.SuiteFile)
+	for _, topTitle := range root.order {
+		top := root.children[topTitle]
+		suite := c.buildSuite(top, report.SuiteFile)
 		rep.Suites = append(rep.Suites, suite)
 	}
 
@@ -349,12 +372,37 @@ func (c *Converter) buildUnattributedErrors() []report.ReportError {
 	return errs
 }
 
+// fileFor resolves the source file of a top-level test function. It returns a
+// grouping key (used to merge tests from the same file) and the git-relative
+// file path. Both are empty when the location can't be resolved (no locator,
+// non-test entry, or lookup failure), signaling a package-level fallback.
+func (c *Converter) fileFor(pkg, topFunc string) (key, file string) {
+	if c.Locator == nil {
+		return "", ""
+	}
+	if !isLocatableFunc(topFunc) {
+		return "", ""
+	}
+	loc := c.Locator.Locate(pkg, topFunc)
+	if loc == nil || loc.File == "" {
+		return "", ""
+	}
+	// Key by pkg+file so identically-named files in different packages don't
+	// merge; the suite title is the file path itself.
+	return pkg + "\x00" + loc.File, loc.File
+}
+
 func (c *Converter) buildSuite(n *node, typ report.SuiteType) report.Suite {
 	s := report.Suite{Type: typ, Title: n.title}
-	// The top-level test function (first segment) can be located in source.
-	if !n.isPkg && c.Locator != nil {
-		topFunc := topLevelFunc(n)
-		if topFunc != "" {
+	switch {
+	case n.isFile && n.file != "":
+		// A "file" suite is titled by and located at its source file. The spec
+		// uses (0,0) for file-suite locations.
+		s.Location = &report.Location{File: n.file, Line: 0, Column: 0}
+	case !n.isFile && c.Locator != nil:
+		// A named suite for a top-level test function (TestXxx) carries that
+		// function's source location.
+		if topFunc := topLevelFunc(n); topFunc != "" {
 			s.Location = c.Locator.Locate(n.pkg, topFunc)
 		}
 	}
@@ -388,12 +436,18 @@ func testCarriesSignal(ta *testAcc) bool {
 	return false
 }
 
+// isLocatableFunc reports whether name looks like a top-level Go test entry
+// point (TestXxx/ExampleXxx/BenchmarkXxx/FuzzXxx) that go/ast can locate.
+func isLocatableFunc(name string) bool {
+	return strings.HasPrefix(name, "Test") || strings.HasPrefix(name, "Example") ||
+		strings.HasPrefix(name, "Benchmark") || strings.HasPrefix(name, "Fuzz")
+}
+
 // topLevelFunc returns the top-level test function name for a suite node, used
 // for source location. Only suites that correspond to a `func TestXxx` (i.e.
 // not deeper subtests) resolve to a real function.
 func topLevelFunc(n *node) string {
-	if strings.HasPrefix(n.title, "Test") || strings.HasPrefix(n.title, "Example") ||
-		strings.HasPrefix(n.title, "Benchmark") || strings.HasPrefix(n.title, "Fuzz") {
+	if isLocatableFunc(n.title) {
 		return n.title
 	}
 	return ""

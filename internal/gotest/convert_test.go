@@ -411,3 +411,76 @@ func TestConvert_StripsAnsiFromErrorMessage(t *testing.T) {
 		t.Errorf("error message = %q, want ANSI stripped", msg)
 	}
 }
+
+// fakeLocator maps a test function name to a fixed location, for exercising the
+// file-suite grouping without real go/ast resolution.
+type fakeLocator map[string]*report.Location
+
+func (f fakeLocator) Locate(pkg, fn string) *report.Location { return f[fn] }
+
+func decodeWithLocator(t *testing.T, loc Locator, stream string) report.Report {
+	t.Helper()
+	conv := &Converter{Locator: loc}
+	if err := DecodeStream(strings.NewReader(stream), conv.Process); err != nil {
+		t.Fatalf("DecodeStream: %v", err)
+	}
+	return conv.Build()
+}
+
+func TestConvert_FileSuites(t *testing.T) {
+	// Two top-level tests in different source files of the same package must
+	// produce two separate "file" suites titled by their git-relative paths,
+	// each with a file location — not one import-path bucket.
+	loc := fakeLocator{
+		"TestA": {File: "pkg/a_test.go", Line: 10, Column: 1},
+		"TestB": {File: "pkg/b_test.go", Line: 20, Column: 1},
+	}
+	stream := `
+{"Time":"2024-01-01T00:00:00Z","Action":"run","Package":"ex/pkg","Test":"TestA"}
+{"Time":"2024-01-01T00:00:01Z","Action":"pass","Package":"ex/pkg","Test":"TestA","Elapsed":0.1}
+{"Time":"2024-01-01T00:00:01Z","Action":"run","Package":"ex/pkg","Test":"TestB"}
+{"Time":"2024-01-01T00:00:02Z","Action":"pass","Package":"ex/pkg","Test":"TestB","Elapsed":0.1}
+`
+	rep := decodeWithLocator(t, loc, stream)
+	if len(rep.Suites) != 2 {
+		t.Fatalf("want 2 file suites, got %d: %+v", len(rep.Suites), rep.Suites)
+	}
+	byTitle := map[string]report.Suite{}
+	for _, s := range rep.Suites {
+		if s.Type != report.SuiteFile {
+			t.Errorf("suite %q type = %q, want file", s.Title, s.Type)
+		}
+		if s.Location == nil || s.Location.File != s.Title {
+			t.Errorf("file suite %q must have a location with file == title, got %+v", s.Title, s.Location)
+		}
+		if s.Location != nil && (s.Location.Line != 0 || s.Location.Column != 0) {
+			t.Errorf("file suite %q location should be (0,0), got %+v", s.Title, s.Location)
+		}
+		byTitle[s.Title] = s
+	}
+	if a, ok := byTitle["pkg/a_test.go"]; !ok || findTest(a, "TestA") == nil {
+		t.Errorf("TestA should be under pkg/a_test.go: %+v", byTitle)
+	}
+	if b, ok := byTitle["pkg/b_test.go"]; !ok || findTest(b, "TestB") == nil {
+		t.Errorf("TestB should be under pkg/b_test.go: %+v", byTitle)
+	}
+}
+
+func TestConvert_FileSuiteFallbackToPackage(t *testing.T) {
+	// With no locator, top-level suites fall back to package-titled file suites
+	// (nothing is lost).
+	stream := `
+{"Time":"2024-01-01T00:00:00Z","Action":"run","Package":"ex/pkg","Test":"TestA"}
+{"Time":"2024-01-01T00:00:01Z","Action":"pass","Package":"ex/pkg","Test":"TestA","Elapsed":0.1}
+`
+	rep := decode(t, stream) // no locator
+	if len(rep.Suites) != 1 || rep.Suites[0].Title != "ex/pkg" {
+		t.Fatalf("want single ex/pkg fallback suite, got %+v", rep.Suites)
+	}
+	if rep.Suites[0].Type != report.SuiteFile {
+		t.Errorf("fallback suite type = %q, want file", rep.Suites[0].Type)
+	}
+	if findTest(rep.Suites[0], "TestA") == nil {
+		t.Errorf("TestA missing from fallback suite")
+	}
+}
