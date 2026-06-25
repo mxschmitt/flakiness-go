@@ -7,6 +7,13 @@ import (
 	"time"
 )
 
+func init() {
+	// Make retries instant in tests (preserve attempt count).
+	for i := range oidcBackoff {
+		oidcBackoff[i] = 0
+	}
+}
+
 func TestFromEnv_Absent(t *testing.T) {
 	t.Setenv("ACTIONS_ID_TOKEN_REQUEST_URL", "")
 	t.Setenv("ACTIONS_ID_TOKEN_REQUEST_TOKEN", "")
@@ -76,5 +83,29 @@ func TestFetchToken_HTTPError(t *testing.T) {
 	g := &GithubOIDC{requestURL: srv.URL, requestToken: "x", client: srv.Client()}
 	if _, err := g.FetchToken("aud"); err == nil {
 		t.Error("expected error on 403")
+	}
+}
+
+func TestFetchToken_RetriesThenSucceeds(t *testing.T) {
+	var calls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if calls < 3 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		w.Write([]byte(`{"value":"tok-after-retry"}`))
+	}))
+	defer srv.Close()
+	g := &GithubOIDC{requestURL: srv.URL, requestToken: "x", client: srv.Client()}
+	tok, err := g.FetchToken("aud")
+	if err != nil {
+		t.Fatalf("FetchToken should succeed after retries: %v", err)
+	}
+	if tok != "tok-after-retry" {
+		t.Errorf("token = %q", tok)
+	}
+	if calls != 3 {
+		t.Errorf("server hit %d times, want 3", calls)
 	}
 }

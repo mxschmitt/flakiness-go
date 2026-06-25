@@ -377,3 +377,37 @@ func TestConvert_FailingPackageWithTestsNotUnattributed(t *testing.T) {
 		t.Errorf("a normal test failure should not be unattributed, got %+v", rep.UnattributedError)
 	}
 }
+
+func TestStripANSI(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"\x1b[31mError: boom\x1b[0m", "Error: boom"},
+		{"plain text", "plain text"},
+		{"", ""},
+		{"\x1b[1;32mPASS\x1b[m done", "PASS done"},
+	}
+	for _, c := range cases {
+		if got := stripANSI(c.in); got != c.want {
+			t.Errorf("stripANSI(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+func TestConvert_StripsAnsiFromErrorMessage(t *testing.T) {
+	// A failing test whose first output line carries ANSI color must surface a
+	// clean error message (matching the SDK reporters). The literal  in
+	// the JSON decodes to the ESC byte, so Output truly contains ANSI codes.
+	const esc = "\\u001b" // literal backslash-u-001b in the JSON text
+	stream := "\n" +
+		"{\"Action\":\"run\",\"Package\":\"ex/pkg\",\"Test\":\"TestC\"}\n" +
+		"{\"Action\":\"output\",\"Package\":\"ex/pkg\",\"Test\":\"TestC\",\"Output\":\"" + esc + "[31massertion failed: 1 != 2" + esc + "[0m\\n\"}\n" +
+		"{\"Action\":\"fail\",\"Package\":\"ex/pkg\",\"Test\":\"TestC\",\"Elapsed\":0.1}\n"
+	rep := decode(t, stream)
+	suite := findSuite(t, rep, "ex/pkg")
+	tc := findTest(suite, "TestC")
+	if tc == nil || len(tc.Attempts[0].Errors) != 1 {
+		t.Fatalf("expected one error: %+v", tc)
+	}
+	msg := tc.Attempts[0].Errors[0].Message
+	if msg != "assertion failed: 1 != 2" {
+		t.Errorf("error message = %q, want ANSI stripped", msg)
+	}
+}

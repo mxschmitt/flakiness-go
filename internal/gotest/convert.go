@@ -462,7 +462,7 @@ func (c *Converter) buildAttempt(a *attempt, isBench bool) report.RunAttempt {
 	}
 	switch status {
 	case report.StatusFailed, report.StatusTimedOut:
-		ra.Errors = []report.ReportError{{Message: failureMessage(a.output.String())}}
+		ra.Errors = []report.ReportError{{Message: stripANSI(failureMessage(a.output.String()))}}
 	case report.StatusSkipped:
 		ann := report.Annotation{Type: "skip"}
 		if a.skipReason != "" {

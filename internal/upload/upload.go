@@ -38,15 +38,16 @@ func compressBrotli(data []byte) ([]byte, error) {
 }
 
 // isCompressible reports whether a content type should be brotli-compressed
-// before upload, mirroring the SDK's heuristic.
+// before upload. This mirrors the Node SDK's heuristic exactly
+// (uploadReport.ts _uploadAttachment): text/* plus the +json/+text/+xml
+// structured-suffix families. Note the SDK deliberately does NOT treat bare
+// application/json or application/xml as compressible, so neither do we.
 func isCompressible(contentType string) bool {
 	ct := strings.ToLower(strings.TrimSpace(contentType))
 	return strings.HasPrefix(ct, "text/") ||
 		strings.HasSuffix(ct, "+json") ||
 		strings.HasSuffix(ct, "+text") ||
-		strings.HasSuffix(ct, "+xml") ||
-		ct == "application/json" ||
-		ct == "application/xml"
+		strings.HasSuffix(ct, "+xml")
 }
 
 // Attachment is a local file to upload alongside the report.

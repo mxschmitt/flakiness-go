@@ -44,7 +44,35 @@ func (g *GithubOIDC) FetchToken(audience string) (string, error) {
 	q.Set("audience", audience)
 	u.RawQuery = q.Encode()
 
-	req, err := http.NewRequest(http.MethodGet, u.String(), nil)
+	// Retry on transient failures with the same backoff schedule the Node SDK
+	// uses for its GET requests (getJSON over HTTP_BACKOFF).
+	var lastErr error
+	for attempt := 0; attempt <= len(oidcBackoff); attempt++ {
+		token, err := g.fetchOnce(u.String())
+		if err == nil {
+			return token, nil
+		}
+		lastErr = err
+		if attempt < len(oidcBackoff) {
+			time.Sleep(oidcBackoff[attempt])
+		}
+	}
+	return "", lastErr
+}
+
+// oidcBackoff mirrors the Node SDK's HTTP_BACKOFF (_internalUtils.ts).
+// Overridable in tests.
+var oidcBackoff = []time.Duration{
+	100 * time.Millisecond,
+	500 * time.Millisecond,
+	1000 * time.Millisecond,
+	1000 * time.Millisecond,
+	1000 * time.Millisecond,
+	1000 * time.Millisecond,
+}
+
+func (g *GithubOIDC) fetchOnce(url string) (string, error) {
+	req, err := http.NewRequest(http.MethodGet, url, nil)
 	if err != nil {
 		return "", err
 	}

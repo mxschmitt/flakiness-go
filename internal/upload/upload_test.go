@@ -122,3 +122,19 @@ func TestUpload_StartFailsHard(t *testing.T) {
 		t.Fatal("expected error on 401 start")
 	}
 }
+
+func TestIsCompressible(t *testing.T) {
+	compressible := []string{"text/plain", "text/html; charset=utf-8", "image/svg+xml", "application/manifest+json", "application/foo+text"}
+	for _, ct := range compressible {
+		if !isCompressible(ct) {
+			t.Errorf("isCompressible(%q) = false, want true", ct)
+		}
+	}
+	// The SDK does NOT compress bare application/json or application/xml.
+	notCompressible := []string{"application/json", "application/xml", "image/png", "application/octet-stream", ""}
+	for _, ct := range notCompressible {
+		if isCompressible(ct) {
+			t.Errorf("isCompressible(%q) = true, want false (matches SDK)", ct)
+		}
+	}
+}
