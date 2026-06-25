@@ -307,7 +307,7 @@ func TestBuildEnvironment_OSNameAndFKEnv(t *testing.T) {
 	}
 	env := r.buildEnvironment()
 
-	// osName normalized per platform.
+	// osName normalized per platform (matching the Node SDK).
 	switch runtime.GOOS {
 	case "darwin":
 		if env.SystemData.OSName != "macos" {
@@ -316,6 +316,17 @@ func TestBuildEnvironment_OSNameAndFKEnv(t *testing.T) {
 	case "windows":
 		if env.SystemData.OSName != "win" {
 			t.Errorf("windows -> osName = %q, want win", env.SystemData.OSName)
+		}
+	case "linux":
+		// The SDK uses the distro NAME from /etc/os-release (e.g. "ubuntu"),
+		// falling back to "linux". Either is acceptable; never raw GOOS-only
+		// when os-release exists. Just require it to be non-empty and lowercase.
+		n := env.SystemData.OSName
+		if n == "" {
+			t.Error("linux -> osName is empty")
+		}
+		if n != strings.ToLower(n) {
+			t.Errorf("linux -> osName = %q, want lowercase", n)
 		}
 	default:
 		if env.SystemData.OSName != runtime.GOOS {
