@@ -164,10 +164,11 @@ func (r *Runner) buildEnvironment() report.Environment {
 			OSVersion: osVersion(),
 			OSArch:    osArch(),
 		},
-		Metadata: map[string]any{
-			"go_version": strings.TrimPrefix(runtime.Version(), "go"),
-		},
+		Metadata: map[string]any{},
 	}
+	// Merge order mirrors the Node SDK (createEnvironment.ts):
+	// `{ ...FK_ENV_*, ...explicitMetadata }`, i.e. FK_ENV_* are applied first
+	// and reporter-supplied metadata (here `go_version`) wins on collision.
 	const prefix = "FK_ENV_"
 	for _, kv := range r.Environ() {
 		eq := strings.IndexByte(kv, '=')
@@ -176,15 +177,15 @@ func (r *Runner) buildEnvironment() report.Environment {
 		}
 		k, v := kv[:eq], kv[eq+1:]
 		if strings.HasPrefix(strings.ToUpper(k), prefix) {
-			// Match the canonical Node SDK (createEnvironment.ts): the key has
-			// its prefix stripped and is lowercased, and the VALUE is trimmed
-			// and lowercased too. Keeping these in lockstep matters because the
-			// server dedups environments by a hash of the whole object and FQL
-			// queries match on these normalized values.
+			// Match the SDK: key has its prefix stripped and is lowercased, and
+			// the VALUE is trimmed and lowercased too. Keeping these in lockstep
+			// matters because the server dedups environments by a hash of the
+			// whole object and FQL queries match on these normalized values.
 			key := strings.ToLower(k[len(prefix):])
 			env.Metadata[key] = strings.ToLower(strings.TrimSpace(v))
 		}
 	}
+	env.Metadata["go_version"] = strings.TrimPrefix(runtime.Version(), "go")
 	return env
 }
 

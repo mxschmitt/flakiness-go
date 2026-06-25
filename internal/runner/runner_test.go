@@ -354,6 +354,20 @@ func TestBuildEnvironment_OSNameAndFKEnv(t *testing.T) {
 	}
 }
 
+func TestBuildEnvironment_ExplicitMetadataWinsOverFKEnv(t *testing.T) {
+	// The SDK merges { ...FK_ENV_*, ...explicitMetadata }, so a colliding
+	// FK_ENV_GO_VERSION must NOT override the real go_version we set.
+	r := &Runner{
+		Cfg:     &config.Config{Name: "go"},
+		Environ: func() []string { return []string{"FK_ENV_GO_VERSION=999.dont.win"} },
+	}
+	env := r.buildEnvironment()
+	gv, _ := env.Metadata["go_version"].(string)
+	if gv == "999.dont.win" || gv == "" {
+		t.Errorf("go_version = %q; real Go version must win over FK_ENV_GO_VERSION", gv)
+	}
+}
+
 func TestRunner_SkipsUploadOnInvalidCommit(t *testing.T) {
 	var got report.Report
 	srv := fakeFlakinessServer(t, &got)
