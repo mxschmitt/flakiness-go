@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"regexp"
 	"runtime"
+	"sort"
 	"strings"
 	"time"
 
@@ -38,6 +39,12 @@ type Runner struct {
 	Getenv func(string) string
 	// Environ lists environment entries; defaults to os.Environ.
 	Environ func() []string
+
+	// runRound runs one `go test -json <args>` invocation, feeding each decoded
+	// event to onEvent, and returns go test's exit code. It is a field so tests
+	// can drive the rerun loop with synthetic event streams; nil defaults to the
+	// real `go test` subprocess (goTestRound).
+	runRound func(args []string, onEvent func(gotest.TestEvent) error) (int, error)
 }
 
 // Run executes the reporter and returns the process exit code. The exit code
@@ -50,6 +57,9 @@ func (r *Runner) Run() (int, error) {
 	if r.Environ == nil {
 		r.Environ = os.Environ
 	}
+	if r.runRound == nil {
+		r.runRound = r.goTestRound
+	}
 
 	conv := &gotest.Converter{}
 	if r.Cfg.GitRoot != "" {
@@ -61,13 +71,18 @@ func (r *Runner) Run() (int, error) {
 	var sampler *telemetry.Sampler
 	if r.Cfg.Stdin {
 		// In stdin mode the tests already ran elsewhere, so sampling this
-		// process's resource use would be meaningless.
+		// process's resource use would be meaningless. --rerun-failed is also
+		// inapplicable: flakiness-go isn't driving go test, so it can't re-invoke
+		// it — warn rather than silently ignore the flag.
+		if r.Cfg.RerunFailed > 0 {
+			fmt.Fprintln(r.Stderr, "[Flakiness] Warning: --rerun-failed has no effect with --stdin (reruns require wrapper mode, where flakiness-go runs go test)")
+		}
 		err = gotest.DecodeStream(r.Stdin, conv.Process)
 	} else {
 		// Wrapper mode: sample system CPU/RAM while `go test` runs.
 		sampler = telemetry.NewSampler()
 		sampler.Start()
-		testExit, err = r.runGoTest(conv)
+		testExit, err = r.runWithReruns(conv)
 	}
 	if err != nil {
 		return 1, err
@@ -104,14 +119,123 @@ func (r *Runner) Run() (int, error) {
 	return testExit, nil
 }
 
-// runGoTest runs `go test -json <args>`, feeds the event stream into the
-// converter, and returns go test's exit code. Each decoded `output` event is
-// re-emitted to stdout so the developer still sees normal, human-readable
-// `go test` output (the concatenation of all output events is exactly the
-// original test output) rather than a silent run or raw JSON.
-func (r *Runner) runGoTest(conv *gotest.Converter) (int, error) {
-	args := append([]string{"test", "-json"}, r.Cfg.GoTestArgs...)
-	cmd := exec.Command("go", args...)
+// runWithReruns runs the initial `go test -json` pass and, when --rerun-failed
+// is enabled, re-invokes go test on only the still-failing tests up to N more
+// times. Every invocation's events feed the same converter, so each rerun
+// becomes an additional RunAttempt — a fail-then-pass surfaces as flaky while
+// the job stays green (upstream-Playwright retry semantics). It returns the
+// effective exit code:
+//
+//   - reruns disabled        → the first run's exit code (unchanged behavior)
+//   - a failed test recovered → 0 (green-on-transient)
+//   - a test failed every attempt, a non-rerunnable failure (build error,
+//     benchmark), or a safeguard tripped → non-zero
+func (r *Runner) runWithReruns(conv *gotest.Converter) (int, error) {
+	// Round 0: the full run exactly as the user requested.
+	obs := newRoundObserver(conv, r.Stdout)
+	round0Exit, err := r.runRound(r.Cfg.GoTestArgs, obs.process)
+	if err != nil {
+		return 1, err
+	}
+
+	// Track each originally-failed test for recovery. The job's verdict is
+	// per-test: it goes green only if every test that failed in round 0 later
+	// passes (the issue's "succeed if a test passed on any attempt"). pending is
+	// keyed by full test name so a test recovers independently of its siblings —
+	// rerunning a parent func re-executes passing siblings as collateral, and
+	// their outcomes must not gate the job.
+	pending := map[testKey]failedTest{}
+	hardFail := obs.hardFailure()
+	for _, f := range obs.failures() {
+		if f.rerunnable {
+			pending[testKey{f.pkg, f.name}] = f
+		} else {
+			// A benchmark (or other non -run-addressable target) can't be retried.
+			hardFail = true
+		}
+	}
+
+	if r.Cfg.RerunFailed <= 0 || len(pending) == 0 {
+		// Reruns disabled, or nothing we can retry: a clean pass, a non-test
+		// failure (build error / benchmark / panic) we must not mask, or a
+		// go-test usage error. In every case the first run's exit code stands.
+		return round0Exit, nil
+	}
+	if max := r.Cfg.RerunMaxFailures; max > 0 && len(pending) > max {
+		fmt.Fprintf(r.Stderr, "[Flakiness] %d tests failed (more than --rerun-failed-max-failures=%d); skipping reruns to avoid masking a broad breakage\n", len(pending), max)
+		return round0Exit, nil
+	}
+	if r.Cfg.RerunAbortOnDataRace && obs.dataRace {
+		fmt.Fprintln(r.Stderr, "[Flakiness] data race detected; skipping reruns (--rerun-failed-abort-on-data-race)")
+		return round0Exit, nil
+	}
+
+	for round := 1; round <= r.Cfg.RerunFailed && len(pending) > 0; round++ {
+		args := composeRerunArgs(r.Cfg.GoTestArgs, pendingSlice(pending))
+		fmt.Fprintf(r.Stderr, "[Flakiness] Rerun %d/%d: retrying %d failed test(s)\n", round, r.Cfg.RerunFailed, len(pending))
+		robs := newRoundObserver(conv, r.Stdout)
+		rerunExit, err := r.runRound(args, robs.process)
+		if err != nil {
+			return 1, err
+		}
+		// Drop tests that passed this round; whatever remains is still failing.
+		for k := range pending {
+			if robs.didPass(k) {
+				delete(pending, k)
+			}
+		}
+		if robs.hardFailure() {
+			hardFail = true
+			break
+		}
+		// A rerun that exited non-zero yet produced no failed-test event (a
+		// hard failure already broke the loop above) is unexplained — a
+		// panic/timeout killed a test with no terminal `fail`, or the composed
+		// args were a usage error. Don't let an empty pending set mask it green.
+		if rerunExit != 0 && len(robs.failures()) == 0 {
+			hardFail = true
+			break
+		}
+		if r.Cfg.RerunAbortOnDataRace && robs.dataRace {
+			fmt.Fprintln(r.Stderr, "[Flakiness] data race detected during rerun; stopping")
+			break
+		}
+	}
+
+	if hardFail || len(pending) > 0 {
+		// A real regression (failed every attempt) or a failure we can't retry.
+		if round0Exit != 0 {
+			return round0Exit, nil
+		}
+		return 1, nil
+	}
+	// Every originally-failed test passed on some attempt: green-on-transient.
+	return 0, nil
+}
+
+// pendingSlice flattens the pending-test set into the deterministic order
+// composeRerunArgs expects.
+func pendingSlice(pending map[testKey]failedTest) []failedTest {
+	out := make([]failedTest, 0, len(pending))
+	for _, f := range pending {
+		out = append(out, f)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].pkg != out[j].pkg {
+			return out[i].pkg < out[j].pkg
+		}
+		return out[i].name < out[j].name
+	})
+	return out
+}
+
+// goTestRound runs one `go test -json <args>` invocation, decoding the event
+// stream and handing each event to onEvent. It returns go test's exit code.
+// Output echoing is the observer's job (so reruns can scope it), keeping this
+// method a thin subprocess wrapper.
+func (r *Runner) goTestRound(args []string, onEvent func(gotest.TestEvent) error) (int, error) {
+	full := append([]string{"test", "-json"}, args...)
+	cmd := exec.Command("go", full...)
 	cmd.Stderr = r.Stderr
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
@@ -121,12 +245,7 @@ func (r *Runner) runGoTest(conv *gotest.Converter) (int, error) {
 		return 1, err
 	}
 
-	decodeErr := gotest.DecodeStream(stdout, func(ev gotest.TestEvent) error {
-		if ev.Action == gotest.ActionOutput && r.Stdout != nil {
-			io.WriteString(r.Stdout, ev.Output)
-		}
-		return conv.Process(ev)
-	})
+	decodeErr := gotest.DecodeStream(stdout, onEvent)
 
 	waitErr := cmd.Wait()
 	if decodeErr != nil {

@@ -185,6 +185,81 @@ func TestRunner_EndToEnd(t *testing.T) {
 	}
 }
 
+// TestRunner_RerunFailed_EndToEnd drives the real `go test -json` through the
+// rerun loop against a fixture that fails its first attempt then passes. It
+// asserts the upstream-Playwright semantics: the job goes green (exit 0) while
+// the flake is still surfaced as two mixed attempts (failed → passed).
+func TestRunner_RerunFailed_EndToEnd(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping end-to-end go test invocation in -short mode")
+	}
+	_, thisFile, _, _ := runtime.Caller(0)
+	moduleDir := filepath.Join(filepath.Dir(thisFile), "..", "..", "testdata", "flaky")
+	outDir := filepath.Join(t.TempDir(), "rep")
+
+	// The fixture counts attempts via a marker file keyed off this dir, so each
+	// re-invocation sees the incremented count.
+	markerDir := t.TempDir()
+	t.Setenv("FLAKY_MARKER_DIR", markerDir)
+
+	cwd, _ := os.Getwd()
+	if err := os.Chdir(moduleDir); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chdir(cwd)
+
+	cfg := &config.Config{
+		OutputDir:            outDir,
+		Name:                 "go",
+		CommitID:             "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+		GitRoot:              moduleDir,
+		DisableUpload:        true,
+		RerunFailed:          2,
+		RerunMaxFailures:     10,
+		RerunAbortOnDataRace: true,
+		GoTestArgs:           []string{"./..."},
+	}
+	r := &Runner{
+		Cfg:     cfg,
+		Stdout:  &bytes.Buffer{},
+		Stderr:  &bytes.Buffer{},
+		Getenv:  func(string) string { return "" },
+		Environ: func() []string { return nil },
+	}
+	code, err := r.Run()
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if code != 0 {
+		t.Errorf("exit code = %d, want 0 (fail-then-pass should be green)", code)
+	}
+
+	data, err := os.ReadFile(filepath.Join(outDir, "report.json"))
+	if err != nil {
+		t.Fatalf("read report: %v", err)
+	}
+	var rep report.Report
+	if err := json.Unmarshal(data, &rep); err != nil {
+		t.Fatalf("parse report: %v", err)
+	}
+
+	flaky := attemptsFor(rep, "TestFlaky")
+	if len(flaky) != 2 {
+		t.Fatalf("TestFlaky attempts = %d, want 2 (flaky: failed then passed)", len(flaky))
+	}
+	if flaky[0].Status != report.StatusFailed {
+		t.Errorf("TestFlaky attempt 0 = %q, want failed", flaky[0].Status)
+	}
+	if flaky[1].Status != report.StatusPassed && flaky[1].Status != "" {
+		t.Errorf("TestFlaky attempt 1 = %q, want passed", flaky[1].Status)
+	}
+
+	// TestStable passed first time and must NOT have been rerun.
+	if stable := attemptsFor(rep, "TestStable"); len(stable) != 1 {
+		t.Errorf("TestStable attempts = %d, want 1 (stable tests are never rerun)", len(stable))
+	}
+}
+
 func suiteTitles(suites []report.Suite) []string {
 	var out []string
 	for _, s := range suites {
@@ -298,6 +373,21 @@ func TestRunner_DisableUploadWritesOnly(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(outDir, "report.json")); err != nil {
 		t.Errorf("report.json should still be written: %v", err)
+	}
+}
+
+func TestRunner_Stdin_RerunFailedWarns(t *testing.T) {
+	outDir := filepath.Join(t.TempDir(), "rep")
+	cfg := &config.Config{
+		Name:          "go",
+		CommitID:      "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+		DisableUpload: true,
+		OutputDir:     outDir,
+		RerunFailed:   2, // requested, but stdin can't drive go test
+	}
+	_, _, errb := runStdin(t, cfg, sampleStream)
+	if !strings.Contains(errb.String(), "--rerun-failed has no effect with --stdin") {
+		t.Errorf("expected stdin+rerun warning, stderr = %q", errb.String())
 	}
 }
 

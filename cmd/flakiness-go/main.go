@@ -23,7 +23,7 @@ import (
 func main() {
 	cfg, err := config.Parse(os.Args[1:])
 	if err != nil {
-		// flag already printed usage/errors for parse failures.
+		fmt.Fprintf(os.Stderr, "[Flakiness] %v\n", err)
 		os.Exit(2)
 	}
 
