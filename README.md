@@ -59,6 +59,53 @@ If you'd rather control the `go test` invocation yourself, pipe a
 go test -json ./... | flakiness-go --stdin
 ```
 
+## Retrying flaky tests
+
+`--rerun-failed` brings upstream-Playwright retry semantics to `go test`: **stay
+green on a transient flake, but still surface it as flaky** on Flakiness.io.
+
+```bash
+flakiness-go --rerun-failed -timeout 15m --race ./...   # bare flag → 2 reruns
+flakiness-go --rerun-failed=3 ./...                     # up to 3 reruns
+```
+
+After the first pass, `flakiness-go` re-invokes `go test` on **only the tests
+that failed** (scoped with an anchored `-run` regex and `-count=1`), up to N more
+times. Every attempt is fed to the same converter, so:
+
+- ✅ a test that **fails then passes** exits **0** (CI green) and is recorded as
+  multiple `RunAttempt`s — Flakiness.io flags it **flaky**, not hidden;
+- ✅ a real regression that **fails every attempt** still exits non-zero;
+- ✅ cost is ~1× plus only-the-failed-tests, not 2× the whole suite.
+
+Only failed tests rerun, so the whole suite isn't re-executed. Reruns are scoped
+to the **top-level test function** (rerunning `TestX` re-executes all of
+`TestX/...`, including subtests that already passed — those extra passing
+attempts are harmless). The job's verdict is **per test**: it goes green only
+once every test that failed in the first run has passed on some attempt.
+
+**Safeguards** (borrowed from [gotestsum](https://github.com/gotestyourself/gotestsum)):
+
+- `--rerun-failed-max-failures=N` (default `10`) — when the first run has more
+  than N distinct failures, reruns are skipped so a broad breakage isn't papered
+  over by per-test retries.
+- `--rerun-failed-abort-on-data-race` (default `true`) — a data race is a real
+  bug; reruns are skipped when the race detector fires.
+
+**Notes**
+
+- Wrapper-mode only. With `--stdin`, `flakiness-go` doesn't drive `go test`, so
+  reruns can't apply (use [`gotestsum --rerun-fails`](https://github.com/gotestyourself/gotestsum)
+  upstream of the pipe instead).
+- Build/compile failures and `TestMain`/`init` panics are never masked — they
+  fail the job immediately without reruns.
+- Benchmarks aren't rerun (they need `-bench`, not `-run`); a failing benchmark
+  fails the job.
+- A `-run` / `-count` you pass is overridden on rerun rounds (Go's flag parsing
+  is last-wins) so the failed-test scope and a cache-busting `-count=1` take
+  effect. The rerun flags are inserted before any `-args` / `--` separator so
+  they reach `go test`, not the test binary.
+
 ## Uploading to Flakiness.io
 
 ### GitHub Actions (OIDC — no secrets)
@@ -106,6 +153,9 @@ default**. Any flag not listed here is forwarded to `go test`.
 | `--flakiness-endpoint` | `FLAKINESS_ENDPOINT` | `https://flakiness.io` | Service endpoint |
 | `--flakiness-disable-upload` | `FLAKINESS_DISABLE_UPLOAD` | `false` | Write the report but don't upload |
 | `--stdin` | — | `false` | Read `go test -json` from stdin |
+| `--rerun-failed[=N]` | `FLAKINESS_RERUN_FAILED` | `0` (off) | Rerun only failed tests up to N times (bare flag → 2). See [Retrying flaky tests](#retrying-flaky-tests) |
+| `--rerun-failed-max-failures` | `FLAKINESS_RERUN_FAILED_MAX_FAILURES` | `10` | Skip reruns when the first run has more than this many distinct failures (`0` = unlimited) |
+| `--rerun-failed-abort-on-data-race` | `FLAKINESS_RERUN_FAILED_ABORT_ON_DATA_RACE` | `true` | Don't rerun when the race detector fires |
 
 ### Custom environment data
 
@@ -120,7 +170,7 @@ reporters): `FK_ENV_GPU_TYPE=H100` becomes `gpu_type: "h100"`.
 | package (import path) | `file` suite |
 | `func TestXxx` | a test (source-located via `go/ast`) |
 | subtest `TestXxx/a/b` | nested `suite` per segment, leaf is a test |
-| repeated run (`-count=N`) | additional `RunAttempt`s on the test |
+| repeated run (`-count=N`) or `--rerun-failed` | additional `RunAttempt`s on the test |
 | `pass` / `fail` / `skip` | attempt status; `panic: test timed out` → `timedOut` |
 | `t.Skip(reason)` | `skip` annotation with the reason |
 
