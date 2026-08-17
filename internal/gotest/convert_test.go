@@ -169,6 +169,29 @@ func TestConvert_ParentFailingOnlyViaSubtestNotDuplicated(t *testing.T) {
 	}
 }
 
+func TestConvert_ParentFailureNoSubtestExplainsIsKept(t *testing.T) {
+	// The other side of the coin: a parent with no message of its own (bare
+	// t.Fail()) whose subtests all PASSED. Nothing else in the report accounts
+	// for the failure, so dropping the parent leaf would make it vanish.
+	stream := `
+{"Time":"2024-01-01T00:00:00Z","Action":"run","Package":"ex/pkg","Test":"TestGroup"}
+{"Time":"2024-01-01T00:00:00Z","Action":"output","Package":"ex/pkg","Test":"TestGroup","Output":"=== RUN   TestGroup\n"}
+{"Time":"2024-01-01T00:00:00Z","Action":"run","Package":"ex/pkg","Test":"TestGroup/sub"}
+{"Time":"2024-01-01T00:00:01Z","Action":"pass","Package":"ex/pkg","Test":"TestGroup/sub","Elapsed":0.1}
+{"Time":"2024-01-01T00:00:01Z","Action":"output","Package":"ex/pkg","Test":"TestGroup","Output":"--- FAIL: TestGroup (0.30s)\n"}
+{"Time":"2024-01-01T00:00:01Z","Action":"fail","Package":"ex/pkg","Test":"TestGroup","Elapsed":0.3}
+`
+	rep := decode(t, stream)
+	group := findSuite(t, rep, "ex/pkg").Suites[0]
+	own := findTest(group, "TestGroup")
+	if own == nil || own.Attempts[0].Status != report.StatusFailed {
+		t.Fatalf("an otherwise-unexplained parent failure must be kept: %+v", group.Tests)
+	}
+	if msg := own.Attempts[0].Errors[0].Message; msg != "test failed" {
+		t.Errorf("error message = %q, want a plain %q", msg, "test failed")
+	}
+}
+
 func TestConvert_MultiLineFailureMessage(t *testing.T) {
 	// A testify assertion is multi-line: Error Trace, expected/actual and a
 	// unified diff. All of it must reach the error message — keeping only the

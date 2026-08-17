@@ -417,27 +417,61 @@ func (c *Converter) buildSuite(n *node, typ report.SuiteType) report.Suite {
 	// Preserve a parent test's own outcome (e.g. it failed via t.Error or
 	// panicked) as a leaf test inside its suite, so it isn't lost. Skip it when
 	// the parent merely passed as an aggregate of its subtests, to avoid noise.
-	if n.own != nil && testCarriesSignal(n.own) {
+	if ownLeafCarriesSignal(n) {
 		t := c.buildTestFrom(n.title, n.pkg, topLevelFunc(n), n.own)
 		s.Tests = append(s.Tests, t)
 	}
 	return s
 }
 
-// testCarriesSignal reports whether a parent test's own attempts contain
-// anything worth surfacing. A parent that only passed is an aggregate of its
-// subtests and adds no information of its own — and so is a parent that failed
-// *only because* a subtest did: go test attributes the why to the subtest and
-// leaves the parent with nothing but `=== RUN` / `--- FAIL` framing. Emitting a
-// leaf for that produces a duplicate test whose sole "error" is the framing
-// itself. A parent earns its leaf when it has a non-passing attempt with output
-// of its own (its own t.Error/t.Fatal, a panic, a skip reason).
-func testCarriesSignal(ta *testAcc) bool {
-	for _, a := range ta.attempts {
+// ownLeafCarriesSignal reports whether a parent test's own attempts are worth
+// emitting as a leaf test inside its suite.
+//
+// A parent that only passed is an aggregate of its subtests and adds no
+// information of its own — and so, usually, is a parent that failed *only
+// because* a subtest did: go test attributes the why to the subtest and leaves
+// the parent with nothing but `=== RUN` / `--- FAIL` framing, so the leaf would
+// be a duplicate test whose sole "error" is that framing.
+//
+// A parent earns its leaf when it has a non-passing attempt that either carries
+// output of its own (its own t.Error/t.Fatal, a panic, a skip reason) or that
+// no subtest accounts for — dropping the latter would make a real failure
+// vanish from the report.
+func ownLeafCarriesSignal(n *node) bool {
+	if n.own == nil {
+		return false
+	}
+	nonPassing := false
+	for _, a := range n.own.attempts {
 		if a.status == "" || a.status == report.StatusPassed {
 			continue
 		}
+		nonPassing = true
 		if cleanFailureOutput(a.output.String()) != "" {
+			return true
+		}
+	}
+	return nonPassing && !hasNonPassingDescendant(n)
+}
+
+// hasNonPassingDescendant reports whether any test below n ended non-passing —
+// i.e. whether the subtree already explains a parent's failure.
+func hasNonPassingDescendant(n *node) bool {
+	for _, title := range n.order {
+		child := n.children[title]
+		if hasNonPassingAttempt(child.test) || hasNonPassingAttempt(child.own) || hasNonPassingDescendant(child) {
+			return true
+		}
+	}
+	return false
+}
+
+func hasNonPassingAttempt(ta *testAcc) bool {
+	if ta == nil {
+		return false
+	}
+	for _, a := range ta.attempts {
+		if a.status != "" && a.status != report.StatusPassed {
 			return true
 		}
 	}
