@@ -105,6 +105,7 @@ func TestConvert_Subtests(t *testing.T) {
 {"Time":"2024-01-01T00:00:01Z","Action":"run","Package":"ex/pkg","Test":"TestGroup/sub_b"}
 {"Time":"2024-01-01T00:00:01Z","Action":"output","Package":"ex/pkg","Test":"TestGroup/sub_b","Output":"    x_test.go:5: boom\n"}
 {"Time":"2024-01-01T00:00:02Z","Action":"fail","Package":"ex/pkg","Test":"TestGroup/sub_b","Elapsed":0.2}
+{"Time":"2024-01-01T00:00:02Z","Action":"output","Package":"ex/pkg","Test":"TestGroup","Output":"    x_test.go:2: parent broke too\n"}
 {"Time":"2024-01-01T00:00:02Z","Action":"fail","Package":"ex/pkg","Test":"TestGroup","Elapsed":2}
 `
 	rep := decode(t, stream)
@@ -135,7 +136,134 @@ func TestConvert_Subtests(t *testing.T) {
 	// The parent's own direct failure must not be lost.
 	own := findTest(group, "TestGroup")
 	if own == nil || own.Attempts[0].Status != report.StatusFailed {
-		t.Errorf("TestGroup's own failing attempt should be preserved: %+v", own)
+		t.Fatalf("TestGroup's own failing attempt should be preserved: %+v", own)
+	}
+	if msg := own.Attempts[0].Errors[0].Message; !strings.Contains(msg, "parent broke too") {
+		t.Errorf("parent error = %q, want its own failure text", msg)
+	}
+}
+
+func TestConvert_ParentFailingOnlyViaSubtestNotDuplicated(t *testing.T) {
+	// A parent fails whenever a subtest fails, but go test attributes the
+	// message to the subtest — the parent's own output is nothing but framing.
+	// Emitting a leaf for it duplicates the test and shows "=== RUN / --- FAIL"
+	// as if it were the error (what flakiness.io then renders).
+	stream := `
+{"Time":"2024-01-01T00:00:00Z","Action":"run","Package":"ex/pkg","Test":"TestGroup"}
+{"Time":"2024-01-01T00:00:00Z","Action":"output","Package":"ex/pkg","Test":"TestGroup","Output":"=== RUN   TestGroup\n"}
+{"Time":"2024-01-01T00:00:00Z","Action":"run","Package":"ex/pkg","Test":"TestGroup/sub"}
+{"Time":"2024-01-01T00:00:00Z","Action":"output","Package":"ex/pkg","Test":"TestGroup/sub","Output":"=== RUN   TestGroup/sub\n"}
+{"Time":"2024-01-01T00:00:01Z","Action":"output","Package":"ex/pkg","Test":"TestGroup/sub","Output":"    x_test.go:5: boom\n"}
+{"Time":"2024-01-01T00:00:01Z","Action":"output","Package":"ex/pkg","Test":"TestGroup/sub","Output":"    --- FAIL: TestGroup/sub (0.20s)\n"}
+{"Time":"2024-01-01T00:00:01Z","Action":"fail","Package":"ex/pkg","Test":"TestGroup/sub","Elapsed":0.2}
+{"Time":"2024-01-01T00:00:01Z","Action":"output","Package":"ex/pkg","Test":"TestGroup","Output":"--- FAIL: TestGroup (0.30s)\n"}
+{"Time":"2024-01-01T00:00:01Z","Action":"fail","Package":"ex/pkg","Test":"TestGroup","Elapsed":0.3}
+`
+	rep := decode(t, stream)
+	group := findSuite(t, rep, "ex/pkg").Suites[0]
+	if len(group.Tests) != 1 || group.Tests[0].Title != "sub" {
+		t.Fatalf("want only the subtest leaf, got %+v", group.Tests)
+	}
+	if msg := group.Tests[0].Attempts[0].Errors[0].Message; msg != "x_test.go:5: boom" {
+		t.Errorf("subtest error = %q, want the assertion text", msg)
+	}
+}
+
+func TestConvert_ParentFailureNoSubtestExplainsIsKept(t *testing.T) {
+	// The other side of the coin: a parent with no message of its own (bare
+	// t.Fail()) whose subtests all PASSED. Nothing else in the report accounts
+	// for the failure, so dropping the parent leaf would make it vanish.
+	stream := `
+{"Time":"2024-01-01T00:00:00Z","Action":"run","Package":"ex/pkg","Test":"TestGroup"}
+{"Time":"2024-01-01T00:00:00Z","Action":"output","Package":"ex/pkg","Test":"TestGroup","Output":"=== RUN   TestGroup\n"}
+{"Time":"2024-01-01T00:00:00Z","Action":"run","Package":"ex/pkg","Test":"TestGroup/sub"}
+{"Time":"2024-01-01T00:00:01Z","Action":"pass","Package":"ex/pkg","Test":"TestGroup/sub","Elapsed":0.1}
+{"Time":"2024-01-01T00:00:01Z","Action":"output","Package":"ex/pkg","Test":"TestGroup","Output":"--- FAIL: TestGroup (0.30s)\n"}
+{"Time":"2024-01-01T00:00:01Z","Action":"fail","Package":"ex/pkg","Test":"TestGroup","Elapsed":0.3}
+`
+	rep := decode(t, stream)
+	group := findSuite(t, rep, "ex/pkg").Suites[0]
+	own := findTest(group, "TestGroup")
+	if own == nil || own.Attempts[0].Status != report.StatusFailed {
+		t.Fatalf("an otherwise-unexplained parent failure must be kept: %+v", group.Tests)
+	}
+	if msg := own.Attempts[0].Errors[0].Message; msg != "test failed" {
+		t.Errorf("error message = %q, want a plain %q", msg, "test failed")
+	}
+}
+
+func TestConvert_MultiLineFailureMessage(t *testing.T) {
+	// A testify assertion is multi-line: Error Trace, expected/actual and a
+	// unified diff. All of it must reach the error message — keeping only the
+	// first line ("x_test.go:796:") throws the actual failure away. The diff's
+	// own `--- Expected` line must survive; only go test's framing is dropped.
+	stream := `
+{"Time":"2024-01-01T00:00:00Z","Action":"run","Package":"ex/pkg","Test":"TestAssert"}
+{"Time":"2024-01-01T00:00:00Z","Action":"output","Package":"ex/pkg","Test":"TestAssert","Output":"=== RUN   TestAssert\n"}
+{"Time":"2024-01-01T00:00:01Z","Action":"output","Package":"ex/pkg","Test":"TestAssert","Output":"    x_test.go:796: \n"}
+{"Time":"2024-01-01T00:00:01Z","Action":"output","Package":"ex/pkg","Test":"TestAssert","Output":"        \tError Trace:\tx_test.go:808\n"}
+{"Time":"2024-01-01T00:00:01Z","Action":"output","Package":"ex/pkg","Test":"TestAssert","Output":"        \tError:      \tNot equal: \n"}
+{"Time":"2024-01-01T00:00:01Z","Action":"output","Package":"ex/pkg","Test":"TestAssert","Output":"        \t            \texpected: \"\"\n"}
+{"Time":"2024-01-01T00:00:01Z","Action":"output","Package":"ex/pkg","Test":"TestAssert","Output":"        \t            \tactual  : \"cookie1=1\"\n"}
+{"Time":"2024-01-01T00:00:01Z","Action":"output","Package":"ex/pkg","Test":"TestAssert","Output":"        \t            \t--- Expected\n"}
+{"Time":"2024-01-01T00:00:01Z","Action":"output","Package":"ex/pkg","Test":"TestAssert","Output":"        \t            \t+++ Actual\n"}
+{"Time":"2024-01-01T00:00:01Z","Action":"output","Package":"ex/pkg","Test":"TestAssert","Output":"--- FAIL: TestAssert (0.26s)\n"}
+{"Time":"2024-01-01T00:00:01Z","Action":"fail","Package":"ex/pkg","Test":"TestAssert","Elapsed":0.26}
+`
+	rep := decode(t, stream)
+	msg := findTest(findSuite(t, rep, "ex/pkg"), "TestAssert").Attempts[0].Errors[0].Message
+	for _, want := range []string{"Error Trace:", `actual  : "cookie1=1"`, "--- Expected", "+++ Actual"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("error message %q missing %q", msg, want)
+		}
+	}
+	for _, unwanted := range []string{"=== RUN", "--- FAIL:"} {
+		if strings.Contains(msg, unwanted) {
+			t.Errorf("error message %q should not carry go test framing %q", msg, unwanted)
+		}
+	}
+	// go test's per-nesting-level indentation is stripped: the first line sits
+	// at column 0 and the detail keeps its relative indent.
+	if !strings.HasPrefix(msg, "x_test.go:796:\n") {
+		t.Errorf("error message not dedented: %q", msg)
+	}
+}
+
+func TestConvert_PanicSplitsIntoMessageAndStack(t *testing.T) {
+	// A panic dump maps onto the spec's message/stack pair: the headline is the
+	// message, the goroutine trace goes to stack.
+	stream := `
+{"Time":"2024-01-01T00:00:00Z","Action":"run","Package":"ex/pkg","Test":"TestPanic"}
+{"Time":"2024-01-01T00:00:00Z","Action":"output","Package":"ex/pkg","Test":"TestPanic","Output":"=== RUN   TestPanic\n"}
+{"Time":"2024-01-01T00:00:01Z","Action":"output","Package":"ex/pkg","Test":"TestPanic","Output":"panic: boom [recovered]\n"}
+{"Time":"2024-01-01T00:00:01Z","Action":"output","Package":"ex/pkg","Test":"TestPanic","Output":"\n"}
+{"Time":"2024-01-01T00:00:01Z","Action":"output","Package":"ex/pkg","Test":"TestPanic","Output":"goroutine 7 [running]:\n"}
+{"Time":"2024-01-01T00:00:01Z","Action":"output","Package":"ex/pkg","Test":"TestPanic","Output":"testing.tRunner.func1.2({0x104, 0xc00})\n"}
+{"Time":"2024-01-01T00:00:01Z","Action":"fail","Package":"ex/pkg","Test":"TestPanic","Elapsed":0.1}
+`
+	rep := decode(t, stream)
+	err := findTest(findSuite(t, rep, "ex/pkg"), "TestPanic").Attempts[0].Errors[0]
+	if err.Message != "panic: boom [recovered]" {
+		t.Errorf("message = %q, want the panic headline", err.Message)
+	}
+	if !strings.Contains(err.Stack, "goroutine 7 [running]:") || !strings.Contains(err.Stack, "testing.tRunner") {
+		t.Errorf("stack = %q, want the goroutine trace", err.Stack)
+	}
+}
+
+func TestConvert_FailureWithoutMessage(t *testing.T) {
+	// A bare t.Fail() leaves no message. The framing must not be echoed back as
+	// if it were the error.
+	stream := `
+{"Time":"2024-01-01T00:00:00Z","Action":"run","Package":"ex/pkg","Test":"TestBare"}
+{"Time":"2024-01-01T00:00:00Z","Action":"output","Package":"ex/pkg","Test":"TestBare","Output":"=== RUN   TestBare\n"}
+{"Time":"2024-01-01T00:00:01Z","Action":"output","Package":"ex/pkg","Test":"TestBare","Output":"--- FAIL: TestBare (0.10s)\n"}
+{"Time":"2024-01-01T00:00:01Z","Action":"fail","Package":"ex/pkg","Test":"TestBare","Elapsed":0.1}
+`
+	rep := decode(t, stream)
+	msg := findTest(findSuite(t, rep, "ex/pkg"), "TestBare").Attempts[0].Errors[0].Message
+	if msg != "test failed" {
+		t.Errorf("error message = %q, want a plain %q", msg, "test failed")
 	}
 }
 
