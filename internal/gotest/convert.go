@@ -425,11 +425,19 @@ func (c *Converter) buildSuite(n *node, typ report.SuiteType) report.Suite {
 }
 
 // testCarriesSignal reports whether a parent test's own attempts contain
-// anything worth surfacing (a non-passing outcome). A parent that only passed
-// is an aggregate of its subtests and adds no information of its own.
+// anything worth surfacing. A parent that only passed is an aggregate of its
+// subtests and adds no information of its own — and so is a parent that failed
+// *only because* a subtest did: go test attributes the why to the subtest and
+// leaves the parent with nothing but `=== RUN` / `--- FAIL` framing. Emitting a
+// leaf for that produces a duplicate test whose sole "error" is the framing
+// itself. A parent earns its leaf when it has a non-passing attempt with output
+// of its own (its own t.Error/t.Fatal, a panic, a skip reason).
 func testCarriesSignal(ta *testAcc) bool {
 	for _, a := range ta.attempts {
-		if a.status != "" && a.status != report.StatusPassed {
+		if a.status == "" || a.status == report.StatusPassed {
+			continue
+		}
+		if cleanFailureOutput(a.output.String()) != "" {
 			return true
 		}
 	}
@@ -516,7 +524,7 @@ func (c *Converter) buildAttempt(a *attempt, isBench bool) report.RunAttempt {
 	}
 	switch status {
 	case report.StatusFailed, report.StatusTimedOut:
-		ra.Errors = []report.ReportError{{Message: stripANSI(failureMessage(a.output.String()))}}
+		ra.Errors = []report.ReportError{failureError(a.output.String(), status)}
 	case report.StatusSkipped:
 		ann := report.Annotation{Type: "skip"}
 		if a.skipReason != "" {
@@ -527,21 +535,130 @@ func (c *Converter) buildAttempt(a *attempt, isBench bool) report.RunAttempt {
 	return ra
 }
 
-// failureMessage produces a concise error message from a failed test's output,
-// preferring the first meaningful assertion/error line.
-func failureMessage(output string) string {
-	lines := strings.Split(output, "\n")
-	for _, ln := range lines {
-		trimmed := strings.TrimSpace(ln)
-		if trimmed == "" {
-			continue
+// failureError builds the report error for a failed/timed-out attempt out of
+// the test's output.
+//
+// The whole failure text is kept (an assertion message is routinely multi-line:
+// testify prints an Error Trace, expected/actual and a diff), minus go test's
+// own framing lines and nesting indentation — so the message reads like the
+// terminal output a developer would look at, without the `=== RUN` / `--- FAIL`
+// bookkeeping. A panic/timeout dump is split into headline + goroutine trace,
+// which is exactly the spec's message/stack pair.
+func failureError(output string, status report.TestStatus) report.ReportError {
+	detail := cleanFailureOutput(output)
+	if detail == "" {
+		// A bare t.Fail() (or a parent test failing solely because a subtest
+		// did) produces no message of its own; say so rather than echoing the
+		// framing lines back as if they were the error.
+		if status == report.StatusTimedOut {
+			return report.ReportError{Message: "test timed out"}
 		}
-		if strings.HasPrefix(trimmed, "=== ") || strings.HasPrefix(trimmed, "--- ") {
-			continue
-		}
-		return trimmed
+		return report.ReportError{Message: "test failed"}
 	}
-	return strings.TrimSpace(output)
+	if headline, ok := panicHeadline(detail); ok {
+		return report.ReportError{Message: headline, Stack: detail}
+	}
+	return report.ReportError{Message: detail}
+}
+
+// goTestFraming are the marker lines go test writes around a test's own output.
+// The `--- X:` forms are matched WITH their colon so that testify's unified
+// diffs (`--- Expected` / `+++ Actual`) survive as failure content.
+var goTestFraming = []string{
+	"=== RUN", "=== PAUSE", "=== CONT", "=== NAME",
+	"--- PASS:", "--- FAIL:", "--- SKIP:", "--- BENCH:",
+}
+
+func isFramingLine(line string) bool {
+	trimmed := strings.TrimLeft(line, " \t")
+	for _, p := range goTestFraming {
+		if strings.HasPrefix(trimmed, p) {
+			return true
+		}
+	}
+	return false
+}
+
+// cleanFailureOutput reduces a test's raw output to its failure text: ANSI
+// codes and go test framing lines are dropped, the indentation go test adds per
+// nesting level is removed, and surrounding blank lines are trimmed. It returns
+// "" when the output carried no message of the test's own.
+func cleanFailureOutput(output string) string {
+	var kept []string
+	for _, ln := range strings.Split(stripANSI(output), "\n") {
+		ln = strings.TrimRight(ln, "\r \t")
+		if isFramingLine(ln) {
+			continue
+		}
+		kept = append(kept, ln)
+	}
+	return strings.Join(trimBlankLines(dedent(kept)), "\n")
+}
+
+// dedent strips the longest whitespace prefix common to every non-blank line.
+func dedent(lines []string) []string {
+	prefix, found := "", false
+	for _, ln := range lines {
+		if strings.TrimSpace(ln) == "" {
+			continue
+		}
+		indent := ln[:len(ln)-len(strings.TrimLeft(ln, " \t"))]
+		if !found {
+			prefix, found = indent, true
+			continue
+		}
+		prefix = commonPrefix(prefix, indent)
+		if prefix == "" {
+			return lines
+		}
+	}
+	if prefix == "" {
+		return lines
+	}
+	out := make([]string, len(lines))
+	for i, ln := range lines {
+		out[i] = strings.TrimPrefix(ln, prefix)
+	}
+	return out
+}
+
+func commonPrefix(a, b string) string {
+	n := min(len(a), len(b))
+	for i := range n {
+		if a[i] != b[i] {
+			return a[:i]
+		}
+	}
+	return a[:n]
+}
+
+func trimBlankLines(lines []string) []string {
+	start, end := 0, len(lines)
+	for start < end && strings.TrimSpace(lines[start]) == "" {
+		start++
+	}
+	for end > start && strings.TrimSpace(lines[end-1]) == "" {
+		end--
+	}
+	return lines[start:end]
+}
+
+// panicHeadline splits a Go panic (or test-timeout) dump into the message that
+// precedes the goroutine trace. ok is false when the output is not a panic dump,
+// in which case the whole text is the message.
+func panicHeadline(detail string) (headline string, ok bool) {
+	lines := strings.Split(detail, "\n")
+	for i, ln := range lines {
+		if i == 0 || !strings.HasPrefix(ln, "goroutine ") || !strings.HasSuffix(ln, "]:") {
+			continue
+		}
+		head := strings.Join(trimBlankLines(lines[:i]), "\n")
+		if head == "" {
+			return "", false
+		}
+		return head, true
+	}
+	return "", false
 }
 
 func (c *Converter) startMillis() int64 {
